@@ -1,0 +1,59 @@
+[project]
+name = "jobpilot"
+version = "0.1.0"
+description = "Self-hosted job application assistant"
+requires-python = ">=3.12"
+dependencies = [
+  "fastapi==0.115.12",
+  "uvicorn[standard]==0.34.2",
+  "sqlalchemy==2.0.40",
+  "alembic==1.15.2",
+  "pydantic==2.11.4",
+  "pydantic-settings==2.9.1",
+  "argon2-cffi==23.1.0",
+  "itsdangerous==2.2.0",
+  "httpx==0.28.1",
+  "python-multipart==0.0.20",
+  "pypdf==5.4.0",
+  "playwright==1.63.0",
+  "cryptography==49.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest==8.3.5",
+  "pytest-asyncio==0.26.0",
+  "ruff==0.11.8",
+]
+
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "S"]
+ignore = ["S101"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI dependency injection idiom.
+extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
+
+[tool.ruff.lint.per-file-ignores]
+"app/apply/page.py" = ["E501"]  # embedded JavaScript
+"tests/*" = ["E501", "S105", "S106"]
+"migrations/*" = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "tests"]

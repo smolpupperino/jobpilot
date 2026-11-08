@@ -1,0 +1,16 @@
+# Secrets and private data: never commit
+.env
+local-data/
+backups/
+
+# Build / tooling
+node_modules/
+frontend/dist/
+backend/app/static/
+__pycache__/
+*.pyc
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.venv/
+local-run/

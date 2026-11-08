@@ -1,0 +1,61 @@
+# JobPilot — `docker compose up -d --build`
+#
+# The dashboard is published on 127.0.0.1:8080 ONLY (not your LAN, not the internet).
+# Reach it from your phone with Tailscale Serve (see docs/SETUP.md):
+#   sudo tailscale serve --bg 8080
+# which gives you https://<this-machine>.<tailnet>.ts.net, visible only on your tailnet.
+
+services:
+  app:
+    build: .
+    image: jobpilot:local
+    container_name: jobpilot
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      JOBPILOT_DATA_DIR: /data
+    ports:
+      - "127.0.0.1:8080:8000"
+    volumes:
+      - ./local-data:/data
+      # Unix socket of the host-side AI runner (airunner/), no network involved.
+      - ./local-run:/run/jobpilot-ai
+    user: "1000:1000"
+    read_only: true
+    tmpfs:
+      - /tmp:size=64m
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 512m
+    cpus: 1.0
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+  # Visible Chromium that the app drives (Chrome DevTools Protocol, private network
+  # only) and that you can watch / take over from your phone via noVNC:
+  #   sudo tailscale serve --bg --https=8443 http://127.0.0.1:6080
+  browser:
+    build: ./browser
+    image: jobpilot-browser:local
+    container_name: jobpilot-browser
+    restart: unless-stopped
+    environment:
+      # Optional; blank = no password (the viewer is tailnet-only via Tailscale Serve).
+      VNC_PASSWORD: ${JOBPILOT_VNC_PASSWORD:-}
+    ports:
+      - "127.0.0.1:6080:6080"   # noVNC; CDP (9223) is NOT published
+    volumes:
+      - ./local-data/browser-profile:/profile
+      - ./local-data/upload:/data/upload:ro   # resume copy for uploads (same path as in the app)
+    user: "1000:1000"
+    shm_size: 1g
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 2g
+    cpus: 2.0
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }

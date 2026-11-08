@@ -1,0 +1,20 @@
+[Unit]
+Description=JobPilot AI runner (claude/codex CLIs over a Unix socket, tools disabled)
+
+[Service]
+ExecStart=/usr/bin/python3 -I %h/jobpilot/airunner/runner.py
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+Restart=always
+RestartSec=3
+# Hardening: the CLIs need to read/write their own config in ~/.claude and ~/.codex,
+# but nothing else in the system.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ReadWritePaths=%h/jobpilot/local-run %h/.claude %h/.claude.json %h/.codex %h/.cache %h/.local/state %h/.local/share/claude
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target
