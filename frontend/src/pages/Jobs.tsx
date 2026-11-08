@@ -79,10 +79,11 @@ function JobCard({ job, statuses, expanded, onToggle, onChange }: {
   const [notes, setNotes] = useState(job.notes);
   const [applyMsg, setApplyMsg] = useState("");
 
-  const startApply = async (force = false) => {
+  const startApply = async (force = false, resume = false) => {
     setApplyMsg("");
     try {
-      await api.post(`/api/jobs/${job.id}/apply${force ? "?force=true" : ""}`);
+      const q = resume ? "?force=true&resume=true" : force ? "?force=true" : "";
+      await api.post(`/api/jobs/${job.id}/apply${q}`);
       setApplyMsg("Started. Follow along on Overview or in Telegram.");
       onChange();
     } catch (e) {
@@ -141,6 +142,11 @@ function JobCard({ job, statuses, expanded, onToggle, onChange }: {
         ) : !["applying", "waiting_for_owner", "submitted_confirmed", "submitted_uncertain"].includes(job.status) && (
           <button className="primary" onClick={() => startApply()}>Apply with JobPilot</button>
         )}
+        {!["applying", "waiting_for_owner", "submitted_confirmed"].includes(job.status) && (
+          <button className="ghost" onClick={() => startApply(true, true)}
+            title="Pick up from the page that's open in JobPilot's browser instead of starting over">
+            Continue where it stopped</button>
+        )}
       </div>
       {applyMsg && <div className="small" style={{ marginTop: 6 }}>{applyMsg}</div>}
       {expanded && (
@@ -154,8 +160,9 @@ function JobCard({ job, statuses, expanded, onToggle, onChange }: {
             <button className="ghost" onClick={remove}>Delete job</button>
           </div>
           <Entered events={events} />
+          <BrowserWork events={events} />
           <h3 style={{ marginTop: 12 }}>Timeline</h3>
-          {events.map((e) => (
+          {events.filter((e) => !e.type.startsWith("browser.")).map((e) => (
             <div key={e.id} className="small spread">
               <span>
                 {label(e.type)}{e.data.after ? `: ${label(String(e.data.after))}` : ""}
@@ -175,6 +182,44 @@ function JobCard({ job, statuses, expanded, onToggle, onChange }: {
         </div>
       )}
     </div>
+  );
+}
+
+/** What the adaptive browser agent tried, step by step: where it got stuck and why. */
+function BrowserWork({ events }: { events: EventRow[] }) {
+  const shown = ["browser.recovery_started", "browser.action_failed", "browser.recovery_succeeded", "browser.blocked",
+    "browser.fallback_model", "browser.submit_guard", "browser.navigation"];
+  const rows = events.filter((e) => shown.includes(e.type));
+  if (!rows.length) return null;
+  const d = (e: EventRow, k: string) => (e.data[k] === undefined || e.data[k] === null ? "" : String(e.data[k]));
+  const text = (e: EventRow): string => {
+    switch (e.type) {
+      case "browser.recovery_started":
+        return d(e, "goal") === "field" ? `Working out the "${d(e, "label")}" control` : "Looking for a way forward";
+      case "browser.action_failed":
+        return `· ${d(e, "action")} ${d(e, "target")} failed: ${d(e, "category").replace(/_/g, " ")} (${d(e, "error")})`;
+      case "browser.recovery_succeeded":
+        return `Done in ${d(e, "steps")} step(s), ${d(e, "ai_calls")} AI call(s)`;
+      case "browser.blocked":
+        return `Gave up: ${d(e, "category").replace(/_/g, " ")}: ${d(e, "reason")} (${d(e, "steps")} step(s), ${d(e, "ai_calls")} AI call(s))`;
+      case "browser.fallback_model":
+        return `· switched to the fallback model (${d(e, "reason")})`;
+      case "browser.submit_guard":
+        return `Before pressing Submit again: ${d(e, "verdict")}`;
+      default:
+        return `· went to ${d(e, "url")}`;
+    }
+  };
+  return (
+    <>
+      <h3 style={{ marginTop: 12 }}>Browser agent</h3>
+      {rows.slice(-60).map((e) => (
+        <div key={e.id} className="small spread" style={{ gap: 12 }}>
+          <span style={{ minWidth: 0, overflowWrap: "anywhere" }}>Page {d(e, "step")}: {text(e)}</span>
+          <span className="muted">{fmtTime(e.ts)}</span>
+        </div>
+      ))}
+    </>
   );
 }
 

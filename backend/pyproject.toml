@@ -52,6 +52,8 @@ extend-immutable-calls = ["fastapi.Depends", "fastapi.Query"]
 
 [tool.ruff.lint.per-file-ignores]
 "app/apply/page.py" = ["E501"]  # embedded JavaScript
+"app/apply/observe.py" = ["E501"]  # embedded JavaScript
+"app/apply/tools.py" = ["E501"]  # embedded JavaScript
 "tests/*" = ["E501", "S105", "S106"]
 "migrations/*" = ["E501"]
 

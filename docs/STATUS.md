@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-07
+Last updated: 2026-11-08
 
 Labels: **Done** = built and tested. **Partial** = some of it works. **Planned** = not started.
 
@@ -111,3 +111,20 @@ Backups: not wanted.
 | Gmail session | Watch | Google signed the job Gmail out twice on 2026-11-07 (once after a browser restart). Cause not confirmed. |
 | CHKD (symplr / HealthcareSource) | Blocked by the site | Account sign-up fails server-side every time ("An error occurred while updating the entries"). Ruled out: our security answers (short plain ones fail too), an existing account (email not registered), the password (`%` removed, then a password with `!@*`; still fails). Job set back to Interested. Fixes from it: "Finish" on account pages isn't the application submit; same error 3x after Submit -> stop and tell the owner; marketing Yes/No (radio/dropdown) answered No even when the site pre-picks Yes; generated passwords use only `!@*-_` and always include one of `!@*`. Shared password rotated twice on 2026-11-08 (existing accounts keep their own saved passwords). |
 | Amazon (amazon.jobs) | Submitted, confirmed (2026-11-08) | Data Center Technician. REQUIRED online assessment by Tue Dec 8 2026 (owner does it). Fixes on the way: verification email from another company domain (amazon.dev vs amazon.jobs) + newest-fresh-code fallback + AI email read; open a link directly when clicking does nothing or keeps returning to the same page; two screenshots per step (viewport + full page); AI can click by screenshot position (code checks what's under the point); Select2/Chosen dropdowns chosen on the hidden real <select>, or typed into their own search box; highlighted != chosen; partial option lists searched instead of asked; "United States"/USA match the country, not outlying islands; Yes/No radios with the question glued to the option label; education level enforced from "Highest level of education completed" (Some college -> High school or equivalent), including wrong pre-filled values; short Telegram replies to one question always saved; re-check after filling; AI review of the whole application before Submit; data-sharing "AI preference" opt-ins answered No; vanished Submit button after a successful submit no longer crashes. |
+
+## Browser agent (2026-11-08)
+
+| Item | Status | Notes |
+|---|---|---|
+| Adaptive browser agent (observe -> act -> verify -> recover) | Done, **off by default** | Settings -> Automation -> "Smart browser agent" (`automation.browser_agent`). Off = previous behavior exactly. Design, safety and limits: `docs/BROWSER_AGENT.md`. Code: `app/apply/observe.py`, `tools.py`, `agent.py`, hooks in `worker.py`. |
+| AI accessibility snapshots | Done | Playwright 1.63 `aria_snapshot(mode="ai", boxes=True)`; refs acted on with `aria-ref=` locators (no `get_by_ref` in 1.63). Valid only for the latest look. Works in cross-origin iframes. |
+| Validated browser actions | Done | click (normal/dom/keyboard), click_at (screenshot pixels, checked first), fill, type_text, press_key, select_option, check/uncheck, scroll, focus, inspect, inspect_options, wait, upload_resume. Structured feedback (found/actionable/executed/verified/what changed/category/hint). |
+| Hybrid routing | Done | Fast page plan first. Agent only for: a fill that failed or didn't stick, a question the planner sees but the reader missed (`other_controls`, fact-checked), a page with no progress / no plan. Bounded: 2 tries per field, 2 per page, 8 decisions each. |
+| Progress detection | Done (flag on) | Values, errors, dialogs, active step and new sections count; URL fragments, clocks and banners don't. |
+| Duplicate-submit guard | Done (flag on) | A second Submit press only if nothing happened or the site shows errors; a changed page with no confirmation and nothing to fill stops as "submitted, not confirmed". |
+| Troubleshooting view | Done | Jobs -> job details -> "Browser agent": what it tried, what failed and why. |
+| Real-browser tests | Done | `./scripts/test-browser.sh` (also run by `./scripts/test.sh`): 48 tests, headless Chromium vs local fixtures. Plus 32 new unit tests. |
+| Benchmark | Done | `./scripts/test-browser.sh bench` (stand-in model) and `--live` (owner's model via the AI runner). Results in `docs/BROWSER_AGENT.md`. |
+| Real ATS sites with the flag on | Next | Not tried yet. Turn the flag on and watch the next runs. |
+| Fixes that help both paths | Done | Nested dropdown answers keep their "Category > Choice" path in check_plan; react-select "single value" boxes are read; "Text me about other job openings" counts as marketing. |
+

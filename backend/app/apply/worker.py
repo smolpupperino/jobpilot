@@ -24,15 +24,26 @@ from typing import Any
 from sqlalchemy import select
 
 from app.ai.client import AIUnavailable, run_task
-from app.apply.page import NO_MATCH, PageState, PageUnresponsive, extract, locator, read_combo_options
+from app.apply.agent import AdaptiveAgent, WorkingMemory
+from app.apply.observe import ProgressTracker, compare, ui_state
+from app.apply.page import (
+    FIND_CONTROL_JS,
+    NO_MATCH,
+    SHOWN_JS,
+    PageState,
+    PageUnresponsive,
+    extract,
+    locator,
+    read_combo_options,
+)
 from app.apply.planner import (
-    PLAN_SCHEMA,
     SECURITY_LABEL,
-    SYSTEM_PROMPT,
     Action,
     CheckedPlan,
     build_prompt,
     check_plan,
+    plan_schema,
+    system_prompt,
 )
 from app.config import get_settings
 from app.db import session_factory, utcnow
@@ -53,7 +64,7 @@ from app.vault import (
 
 log = logging.getLogger("jobpilot.apply")
 
-MAX_STEPS = 30
+MAX_STEPS = 50  # long multi-section applications (account + 8 sections) used up 30
 CONFIRM_TEXT = re.compile(
     r"(thank you for (applying|your application|your interest)|application (has been |was )?"
     r"(received|submitted|complete)|we('ve| have) received your application|successfully submitted)",
@@ -297,23 +308,6 @@ def _search_terms(value: str) -> list[str]:
     if words and len(words[0]) >= 3:
         terms.append(words[0])
     return list(dict.fromkeys(t for t in terms if t.strip()))
-
-
-# What the box shows as chosen, ignoring any open option list (its text isn't a choice).
-SHOWN_JS = r"""e => {
-  // Button-style dropdowns show their choice on the button itself; nearby text (other questions'
-  // answers) must not count.
-  if (e.tagName !== 'INPUT') return (e.innerText || '') + ' | ' + (e.getAttribute('aria-label') || '');
-  const textOf = n => { if (!n) return ''; const c = n.cloneNode(true);
-    c.querySelectorAll('[role=listbox], [role=option], [data-automation-id=promptOption], [role=menu]')
-      .forEach(x => x.remove());
-    return c.textContent || ''; };
-  const wd = e.closest('[data-automation-id=multiselectInputContainer]');
-  const box = (wd && wd.parentElement) || e.closest('.MuiAutocomplete-root, [role=group]')
-    || e.parentElement.parentElement;
-  const inputs = box ? [...box.querySelectorAll('input:not([type=hidden])')].map(i => i.value) : [];
-  return [e.value || '', ...inputs, textOf(box)].join(' | ');
-}"""
 
 
 # A styled dropdown sitting on a hidden real <select> (Select2, Chosen, Bootstrap-select...):
@@ -759,7 +753,7 @@ async def _click(page, context, state: PageState, button_id: str, tries: dict | 
 
 
 async def _plan(job_id: int, job_info: dict, state: PageState, account: dict, hint: str = "",
-                shot: str | None = None, prefer_fallback: bool = False) -> CheckedPlan:
+                shot: str | None = None, prefer_fallback: bool = False, agent: bool = False) -> CheckedPlan:
     facts = _facts()
     images = []
     if shot:
@@ -770,8 +764,9 @@ async def _plan(job_id: int, job_info: dict, state: PageState, account: dict, hi
                 images.append((get_settings().data_dir / rel).read_bytes())
             except OSError:
                 pass
-    res = await run_task("form_mapper", SYSTEM_PROMPT, build_prompt(facts, job_info, state, account, hint),
-                         PLAN_SCHEMA, job_id=job_id, images=images, prefer_fallback=prefer_fallback)
+    prompt = build_prompt(facts, job_info, state, account, hint)
+    res = await run_task("form_mapper", system_prompt(agent), prompt, plan_schema(agent), job_id=job_id,
+                         images=images, prefer_fallback=prefer_fallback)
     return check_plan(res.output, state, {f["id"] for f in facts}, facts)
 
 
@@ -895,14 +890,17 @@ async def _second_look(job_id: int, questions: list) -> list[dict]:
 
 
 async def _plan_escalating(job_id: int, job_info: dict, state: PageState, account: dict,
-                           shot: str | None, stuck: bool, guidance: str | None) -> CheckedPlan:
+                           shot: str | None, stuck: bool, guidance: str | None, agent: bool = False,
+                           memory_note: str = "") -> CheckedPlan:
     """Plan the page; if that makes no progress, look again with the screenshot, then
     with the stronger fallback model. Owner guidance (plain words) is passed along."""
     hint = f"The owner says: {guidance}" if guidance else ""
+    if memory_note:  # what the browser agent already tried on this application (both models see it)
+        hint = (hint + "\n" if hint else "") + "Recent browser work:\n" + memory_note
     if stuck:
         hint = (hint + "\n" if hint else "") + STUCK_HINT
     # The AI always sees the page (screenshot) as well as the element list.
-    plan = await _plan(job_id, job_info, state, account, hint, shot)
+    plan = await _plan(job_id, job_info, state, account, hint, shot, agent=agent)
     if not _no_progress(plan) and not stuck:
         return plan
     for prefer_fallback in (False, True):
@@ -911,9 +909,107 @@ async def _plan_escalating(job_id: int, job_info: dict, state: PageState, accoun
         _set(f"Step {_state['step']}: looking at the screenshot to get unstuck")
         _event(job_id, "apply.escalate", fallback=prefer_fallback)
         plan = await _plan(job_id, job_info, state, account,
-                           (hint + "\n" if hint else "") + STUCK_HINT, shot, prefer_fallback)
+                           (hint + "\n" if hint else "") + STUCK_HINT, shot, prefer_fallback, agent=agent)
         stuck = False
     return plan
+
+
+# ---- adaptive browser agent hooks (only used when automation.browser_agent is on) ----
+
+AGENT_FIELD_KINDS = {"fill": "text", "select_option": "select", "select_combo": "combobox",
+                     "select_radio": "checkbox", "check": "checkbox"}
+
+
+async def _agent_fix(agent: AdaptiveAgent, state: PageState, a: Action, why: str, stats: dict,
+                     tally) -> tuple[bool, str]:
+    """Let the adaptive agent operate one control the fast path couldn't. The value is the one
+    check_plan already approved; the agent only figures out how to enter it."""
+    kind = AGENT_FIELD_KINDS[a.action]
+    loc = locator(state, a.field_id, a.option_id if a.action == "select_radio" else None)
+    value = "check" if a.action == "check" else a.value
+    stats["field_fixes"] += 1
+    out = await agent.operate_field(loc, a.label or a.field_id, value, kind, why)
+    tally(out)
+    if out.success:
+        stats["field_fixed"] += 1
+        return True, ""
+    note = f"the browser agent couldn't set it either ({out.category}: {out.reason[:120]})"
+    if out.options_seen:
+        note += ". Real choices seen: " + "; ".join(out.options_seen[:15])
+    return False, note
+
+
+async def _site_error_for(state: PageState, a: Action) -> str:
+    from app.apply.observe import FIELD_ERROR_JS
+
+    try:
+        return str(await locator(state, a.field_id).first.evaluate(FIELD_ERROR_JS, timeout=5000) or "")
+    except Exception:  # noqa: BLE001
+        return ""
+
+
+async def _still_shows(page, state: PageState, a: Action) -> bool:
+    from app.apply.agent import Goal
+
+    kind = AGENT_FIELD_KINDS[a.action]
+    loc = locator(state, a.field_id, a.option_id if a.action == "select_radio" else None)
+    goal = Goal("field", "", value="check" if a.action == "check" else a.value, label=a.label,
+                field_kind=kind, locator=loc)
+    try:
+        ok, _shown, _open = await AdaptiveAgent(page)._field_shows(goal)
+    except Exception:  # noqa: BLE001
+        return False
+    return ok
+
+
+async def _agent_unstick(agent: AdaptiveAgent, reason: str, stats: dict, tally):
+    """(page, moved): let the agent close popups / find the way forward, without entering data."""
+    stats["unsticks"] += 1
+    out = await agent.unstick(reason)
+    tally(out)
+    if out.progressed:
+        stats["unstuck"] += 1
+    await _settle(agent.page)
+    return agent.page, out.progressed
+
+
+async def _find_control(page, label: str):
+    """A control the page reader missed, found next to its visible label (any frame)."""
+    for frame in page.frames:
+        try:
+            if await frame.evaluate(FIND_CONTROL_JS, label):
+                return frame.locator("[data-jp-widget='1']")
+        except Exception:  # noqa: BLE001, S112
+            continue
+    return None
+
+
+async def _submit_guard(page, pre: dict, new_form: bool = False) -> str:
+    """Before pressing a submit button again after an earlier Submit:
+    "confirmed": a confirmation is showing.
+    "retry": same page and nothing happened, or the site shows errors to fix.
+    "new_step": the page moved on to another step with fields to fill (multi-step sites label
+      intermediate buttons "Submit" too).
+    "uncertain": the page changed, shows no confirmation, no errors and nothing to fill: the
+      first press may have gone through, so don't press again."""
+    texts = []
+    for frame in page.frames:
+        try:
+            texts.append(await frame.evaluate(
+                "() => (document.body ? document.body.innerText : '').slice(0, 20000)"))
+        except Exception:  # noqa: BLE001, S112
+            continue
+    if any(CONFIRM_TEXT.search(t) for t in texts):
+        return "confirmed"
+    try:
+        now = await ui_state(page)
+    except Exception:  # noqa: BLE001
+        return "uncertain"
+    if now.get("errors"):
+        return "retry"
+    if not compare(pre, now).page_level:
+        return "retry"
+    return "new_step" if new_form else "uncertain"
 
 
 async def _fit_gate(page, job_id: int, job_info: dict) -> dict | None:
@@ -930,14 +1026,14 @@ async def _fit_gate(page, job_id: int, job_info: dict) -> dict | None:
     return fit if fit["score"] < a.min_fit_score else None
 
 
-async def _run(job_id: int, force: bool = False) -> dict[str, Any]:
+async def _run(job_id: int, force: bool = False, resume_here: bool = False) -> dict[str, Any]:
     from app.apply.browser import browser_lock
 
     async with browser_lock:
-        return await _run_locked(job_id, force)
+        return await _run_locked(job_id, force, resume_here)
 
 
-async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
+async def _run_locked(job_id: int, force: bool = False, resume_here: bool = False) -> dict[str, Any]:
     from playwright.async_api import async_playwright
 
     s = get_settings()
@@ -966,6 +1062,8 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
 
     submitted = False
     outcome = "stopped"
+    use_agent = False
+    agent_stats: dict[str, int] = {}
     pw = await async_playwright().start()
     try:
         # Chrome rejects DevTools requests whose Host header is a name, so use the IP.
@@ -985,10 +1083,37 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
         link_tries: dict[str, int] = {}  # page|link -> times pressed
         entered_all: list[dict] = []  # everything filled this run (for the review before Submit)
         review_rounds = 0
-        _set("Opening the job page", step=0)
-        await page.goto(job_info["url"], wait_until="domcontentloaded", timeout=60000)
-        await _settle(page)
-        if not force:
+        # Adaptive browser agent (setting automation.browser_agent). Off = the previous behavior.
+        use_agent = _automation().browser_agent
+        memory = WorkingMemory()
+        tracker = ProgressTracker()
+        agent_field_tries: dict[str, int] = {}  # field label -> agent attempts this run
+        unstick_tries: dict[str, int] = {}  # page fingerprint -> agent "get unstuck" attempts
+        agent_stats.update({"field_fixes": 0, "field_fixed": 0, "unsticks": 0, "unstuck": 0, "ai_calls": 0,
+                            "actions": 0, "failed_actions": 0})
+        pre_submit: dict | None = None
+
+        def make_agent(pg, secrets: dict | None = None) -> AdaptiveAgent:
+            hidden = [v for k, v in (secrets or {}).items() if k != "email"]
+            return AdaptiveAgent(pg, context, job_id=job_id, memory=memory, resume=resume,
+                                 events=lambda t, **d: _event(job_id, t, step=_state.get("step", 0), **d),
+                                 secrets=hidden)
+
+        def tally(out) -> None:
+            agent_stats["ai_calls"] += out.ai_calls
+            agent_stats["actions"] += out.actions
+            agent_stats["failed_actions"] += out.failed_actions
+        here = page.url if page.url.startswith(("http://", "https://")) else ""
+        if resume_here and here:
+            # Continue where the browser already is (e.g. a long application that ran out of steps).
+            _set("Continuing from the page that's open in the browser", step=0)
+            _event(job_id, "apply.resumed_here", url=here[:300])
+            await _settle(page)
+        else:
+            _set("Opening the job page", step=0)
+            await page.goto(job_info["url"], wait_until="domcontentloaded", timeout=60000)
+            await _settle(page)
+        if not force and not (resume_here and here):
             skip = await _fit_gate(page, job_id, job_info)
             if skip:
                 outcome = "skipped_fit"
@@ -1017,7 +1142,18 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
             shot = await _screenshot(page, job_id, step, "page")
             await _full_shot(page, shot)
             fp = state.fingerprint()
-            same_count = same_count + 1 if fp == last_fp else 0
+            if use_agent:
+                # Progress = the page moved on OR entered values/errors changed (filling a field on an
+                # otherwise unchanged page counts); clocks and banners don't (observe.ProgressTracker).
+                try:
+                    tracker.update(await ui_state(page))
+                    same_count = tracker.stalled
+                except Exception:  # noqa: BLE001
+                    same_count = same_count + 1 if fp == last_fp else 0
+                memory.stage = f"step {step}: {(state.frames[0].get('headings') or [''])[0][:80]}" \
+                    if state.frames else ""
+            else:
+                same_count = same_count + 1 if fp == last_fp else 0
             last_fp = fp
 
             if submitted and CONFIRM_TEXT.search(state.frames[0].get("text", "") if state.frames else ""):
@@ -1034,7 +1170,10 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
                     account["note"] = ("A sign-up here was started before but never confirmed. Create the "
                                        "account; if the site says this email is already registered, sign in.")
             _set(f"Step {step}: reading the page and planning")
-            plan = await _plan_escalating(job_id, job_info, state, account, shot, same_count >= 1, guidance)
+            plan = await _plan_escalating(job_id, job_info, state, account, shot, same_count >= 1, guidance,
+                                          agent=use_agent,
+                                          memory_note=memory.summary(6) if use_agent and memory.attempts
+                                          else "")
             guidance = None
             _event(job_id, "apply.page", step=step, page_kind=plan.page_kind, fills=len(plan.actions),
                    questions=len(plan.questions), advance=plan.advance_kind, problems=plan.problems[:10],
@@ -1135,11 +1274,29 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
             if plan.pointer and shot:
                 if await _pointer_clicks(page, job_id, step, plan.pointer, shot, pointer_counts):
                     continue  # re-read the page after clicking what the AI saw
+            if (use_agent and same_count >= 2 and not plan.actions and not plan.questions and not plan.widgets
+                    and plan.advance_kind != "submit" and unstick_tries.get(fp, 0) < 2):
+                unstick_tries[fp] = unstick_tries.get(fp, 0) + 1
+                page, moved = await _agent_unstick(make_agent(page), "the page hasn't changed after several "
+                                                   "tries", agent_stats, tally)
+                if moved:
+                    same_count = 0
+                    continue
             if same_count >= 3:
                 guidance = await _takeover(job_id, "this page isn't changing no matter what I try.", shot)
                 same_count = 0
                 continue
 
+            if use_agent and memory.verified:
+                # Values the agent already set and verified: if the field still shows them, don't
+                # re-enter them because the page reader misreads a custom widget.
+                keep = []
+                for a in plan.actions:
+                    done = memory.verified.get((a.label or "")[:80]) == a.value[:80]
+                    if done and a.action in AGENT_FIELD_KINDS and await _still_shows(page, state, a):
+                        continue
+                    keep.append(a)
+                plan.actions = keep
             _set(f"Step {step}: filling {len(plan.actions)} field(s)")
             failures = []
             for a in plan.actions:
@@ -1154,13 +1311,69 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
                 failures.append(f"{a.label[:60]}: didn't stick (the field shows {shown[:80]!r}, "
                                 f"wanted {a.value[:80]!r}); try another way")
                 fill_tries[a.label[:60]] = fill_tries.get(a.label[:60], 0) + 1
+            if use_agent:
+                # Shows the right value but the site rejects it (its form code didn't register the
+                # typing, or a format rule): that's a failure too, for the agent to retype.
+                failed_now = " ".join(failures)
+                for a in plan.actions:
+                    if a.action != "fill" or f"{a.label[:60]}:" in failed_now:
+                        continue
+                    err = await _site_error_for(state, a)
+                    if err:
+                        failures.append(f"{a.label[:60]}: the site rejected it ({err[:120]}); "
+                                        "type it again key by key or in the format it asks for")
+                        fill_tries[a.label[:60]] = fill_tries.get(a.label[:60], 0) + 1
+            fixed_widgets: list[Action] = []
+            if use_agent and (failures or plan.widgets):
+                # Hybrid: the fast plan couldn't operate these controls. Work them out step by step
+                # (same validated values; the agent can't change what is entered, only how).
+                kept = []
+                for msg in failures:
+                    a = next((x for x in plan.actions if msg.startswith(f"{x.label[:60]}:")), None)
+                    key = a.label[:60] if a else ""
+                    if a is None or a.action not in AGENT_FIELD_KINDS or agent_field_tries.get(key, 0) >= 2:
+                        kept.append(msg)
+                        continue
+                    agent_field_tries[key] = agent_field_tries.get(key, 0) + 1
+                    _set(f"Step {step}: working out the {a.label[:40]!r} control")
+                    agent = make_agent(page, secrets)
+                    ok, note = await _agent_fix(agent, state, a, msg, agent_stats, tally)
+                    page = agent.page
+                    if ok:
+                        fill_tries[key] = 0
+                    else:
+                        kept.append(msg + ("; " + note if note else ""))
+                for w in plan.widgets:
+                    key = w.label[:60]
+                    if agent_field_tries.get(key, 0) >= 2:
+                        continue
+                    agent_field_tries[key] = agent_field_tries.get(key, 0) + 1
+                    loc = await _find_control(page, w.label)
+                    if loc is None:
+                        kept.append(f"{key}: couldn't find that control on the page")
+                        continue
+                    _set(f"Step {step}: working out the {w.label[:40]!r} control")
+                    agent = make_agent(page, secrets)
+                    agent_stats["field_fixes"] += 1
+                    out = await agent.operate_field(loc, w.label, w.value, "combobox")
+                    page = agent.page
+                    tally(out)
+                    if out.success:
+                        agent_stats["field_fixed"] += 1
+                        fixed_widgets.append(w)
+                    else:
+                        msg = f"{key}: the browser agent couldn't set it ({out.category}: {out.reason[:120]})"
+                        if out.options_seen:
+                            msg += f". Real choices seen: {'; '.join(out.options_seen[:15])}"
+                        kept.append(msg)
+                failures = kept
             failed_text = " ".join(failures)
-            entered = [_entered(a, secrets, resume) for a in plan.actions
+            entered = [_entered(a, secrets, resume) for a in [*plan.actions, *fixed_widgets]
                        if f"{a.label[:60]}:" not in failed_text]
             if entered:  # the owner's record of exactly what went into each field
                 _event(job_id, "apply.filled", step=step, url=page.url[:300], fields=entered)
                 entered_all.extend(entered)
-            new_written = {a.label[:200]: a.value for a in plan.actions
+            new_written = {a.label[:200]: a.value for a in [*plan.actions, *fixed_widgets]
                            if a.written and f"{a.label[:60]}:" not in failed_text}
             if new_written:
                 wrote.update(new_written)
@@ -1267,6 +1480,26 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
                     if ans != "Submit":
                         raise Stopped("You chose not to submit" if ans else "No approval in time")
                 _check_stop()
+                if use_agent and submit_tries >= 1 and pre_submit is not None:
+                    # Never press Submit again just because the page looks unchanged: the first press
+                    # may have gone through. Only retry when nothing at all happened.
+                    new_form = bool(plan.actions) or any(
+                        f.get("required") and f.get("value") in ("", None, "unchecked")
+                        for f in state.all_fields().values())
+                    verdict = await _submit_guard(page, pre_submit, new_form)
+                    _event(job_id, "browser.submit_guard", step=step, verdict=verdict, attempt=submit_tries)
+                    if verdict == "confirmed":
+                        continue
+                    if verdict == "uncertain":
+                        outcome = "uncertain"
+                        break
+                    if verdict == "new_step":
+                        submit_tries = 0  # a new step's submit button, not a second press of the first
+                if use_agent and submit_tries == 0:
+                    try:
+                        pre_submit = await ui_state(page)
+                    except Exception:  # noqa: BLE001
+                        pre_submit = None
                 submit_tries += 1
                 _event(job_id, "apply.submit_clicked", step=step, attempt=submit_tries)
                 try:
@@ -1290,7 +1523,7 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
                 elif result == "errors" or (result == "nothing" and errors):
                     guidance = ("After clicking Submit the site showed these errors: " + "; ".join(errors)
                                 + ". Fix those fields, then submit again.")
-                elif result == "nothing" and submit_tries >= 3:
+                elif result == "nothing" and submit_tries >= (2 if use_agent else 3):
                     guidance = await _takeover(
                         job_id, "I clicked Submit 3 times and the site didn't respond or show an error.",
                         shot)
@@ -1305,6 +1538,13 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
             if not plan.actions:
                 if await _wait_while_busy(page):
                     continue  # it was still loading: look again instead of asking
+                if use_agent and unstick_tries.get(fp, 0) < 2 and not plan.questions:
+                    unstick_tries[fp] = unstick_tries.get(fp, 0) + 1
+                    _set(f"Step {step}: looking for a way forward")
+                    page, moved = await _agent_unstick(make_agent(page), plan.blocker or "no plan here",
+                                                       agent_stats, tally)
+                    if moved:
+                        continue
                 guidance = await _takeover(job_id, "I don't know how to continue from this page.", shot)
         else:
             outcome = "too_many_steps"
@@ -1358,15 +1598,17 @@ async def _run_locked(job_id: int, force: bool = False) -> dict[str, Any]:
     else:
         restore = prev_status if prev_status not in ("applying", "waiting_for_owner") else "interested"
         _job_status(job_id, restore)
+    if use_agent:
+        _event(job_id, "browser.summary", **agent_stats)
     _event(job_id, "apply.finished", outcome=outcome, submitted=submitted, evidence=last)
     return {"job_id": job_id, "outcome": outcome, "submitted": submitted, "evidence": last}
 
 
-async def _guarded(job_id: int, force: bool) -> None:
+async def _guarded(job_id: int, force: bool, resume_here: bool = False) -> None:
     _last.clear()
     _last.update(job_id=job_id, outcome="error", submitted=False, evidence=None)
     try:
-        _last.update(await _run(job_id, force))
+        _last.update(await _run(job_id, force, resume_here))
     except Exception as e:  # noqa: BLE001
         log.exception("apply run failed")
         _last["error"] = f"{type(e).__name__}: {str(e)[:200]}"
@@ -1385,7 +1627,7 @@ async def _runner_ok() -> bool:
         return False
 
 
-async def start(job_id: int, force: bool = False) -> None:
+async def start(job_id: int, force: bool = False, resume_here: bool = False) -> None:
     global _task
     if _state["running"]:
         raise ApplyError("Another application is already running")
@@ -1400,7 +1642,7 @@ async def start(job_id: int, force: bool = False) -> None:
         raise ApplyError("The AI runner isn't running on the mini PC (scripts/install-ai-runner.sh).")
     _stop.clear()
     _state.update(running=True, job_id=job_id, step=0, message="Starting", started_at=utcnow().isoformat())
-    _task = asyncio.create_task(_guarded(job_id, force))
+    _task = asyncio.create_task(_guarded(job_id, force, resume_here))
 
 
 def last_result() -> dict[str, Any]:

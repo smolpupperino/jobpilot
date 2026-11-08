@@ -13,10 +13,11 @@ router = APIRouter(prefix="/api", tags=["apply"], dependencies=[Depends(require_
 
 
 @router.post("/jobs/{job_id}/apply")
-async def start_apply(job_id: int, force: bool = False) -> dict:
-    """force=true skips the fit check ("Apply anyway")."""
+async def start_apply(job_id: int, force: bool = False, resume: bool = False) -> dict:
+    """force=true skips the fit check ("Apply anyway"). resume=true continues from the page that is
+    open in JobPilot's browser instead of opening the job posting again."""
     try:
-        await worker.start(job_id, force=force)
+        await worker.start(job_id, force=force, resume_here=resume)
     except worker.ApplyError as e:
         raise HTTPException(409, str(e)) from e
     return worker.status()

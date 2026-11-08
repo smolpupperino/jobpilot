@@ -70,7 +70,7 @@ EXTRACT_JS = r"""
       || (el.parentElement && el.parentElement.parentElement);
     if (!root) return '';
     return T([...root.querySelectorAll('.MuiChip-label, [class*=multi-value__label], [class*=chip], [class*=tag-label], '
-      + '[data-automation-id=selectedItem]')]
+      + '[data-automation-id=selectedItem], [class*=single-value], [class*=singleValue]')]
       .map(c => c.innerText).filter(Boolean).join(', '), 200);
   };
   const GENERIC = /^(?!.*name)(year|month|day|date|yyyy|mm|dd|hour|minute|am\/pm|from|to|start|end|first|middle|last)\b.{0,10}$/i;
@@ -388,3 +388,47 @@ def locator(page_state: PageState, qualified_id: str, option_id: str | None = No
     idx, el_id = qualified_id.split(":", 1)
     frame = page_state.frames[int(idx)]["_frame"]
     return frame.locator(f'[data-jp-id="{option_id or el_id}"]')
+
+
+# What the box shows as chosen, ignoring any open option list (its text isn't a choice).
+SHOWN_JS = r"""e => {
+  // Button-style dropdowns show their choice on the button itself; nearby text (other questions'
+  // answers) must not count.
+  if (e.tagName !== 'INPUT') return (e.innerText || '') + ' | ' + (e.getAttribute('aria-label') || '');
+  const textOf = n => { if (!n) return ''; const c = n.cloneNode(true);
+    c.querySelectorAll('[role=listbox], [role=option], [data-automation-id=promptOption], [role=menu]')
+      .forEach(x => x.remove());
+    return c.textContent || ''; };
+  const wd = e.closest('[data-automation-id=multiselectInputContainer]');
+  const box = (wd && wd.parentElement) || e.closest('.MuiAutocomplete-root, [role=group]')
+    || e.parentElement.parentElement;
+  const inputs = box ? [...box.querySelectorAll('input:not([type=hidden])')].map(i => i.value) : [];
+  return [e.value || '', ...inputs, textOf(box)].join(' | ');
+}"""
+
+
+# A control the page reader missed, found next to its visible label (worker._find_control).
+FIND_CONTROL_JS = r"""(label) => {
+  const norm = s => (s || '').replace(/\s+/g, ' ').trim().toLowerCase().replace(/\s*\*+$/, '');
+  const want = norm(label);
+  const vis = e => { const r = e.getBoundingClientRect(); const s = getComputedStyle(e);
+    return r.width > 0 && r.height > 0 && s.visibility !== 'hidden' && s.display !== 'none'; };
+  let best = null;
+  for (const el of document.querySelectorAll('label, legend, span, div, p, h3, h4, h5, strong, dt, th')) {
+    const own = norm([...el.childNodes].filter(n => n.nodeType === 3).map(n => n.textContent).join(' '));
+    if (!own || !(own === want || (own.startsWith(want) && want.length > 3) || (want.startsWith(own) && own.length > 3)))
+      continue;
+    if (vis(el)) { best = el; break; }
+  }
+  if (!best) return false;
+  document.querySelectorAll('[data-jp-widget]').forEach(x => x.removeAttribute('data-jp-widget'));
+  if (best.control) { best.control.setAttribute('data-jp-widget', '1'); return true; }
+  let box = best.parentElement;
+  for (let i = 0; i < 3 && box; i++, box = box.parentElement) {
+    const c = [...box.querySelectorAll('input:not([type=hidden]), select, textarea, [role=combobox], [tabindex], '
+        + '[aria-haspopup], button, [class*=select], [class*=dropdown], [class*=control]')]
+      .find(x => x !== best && !best.contains(x) && vis(x) && (best.compareDocumentPosition(x) & 4));
+    if (c) { c.setAttribute('data-jp-widget', '1'); return true; }
+  }
+  return false;
+}"""

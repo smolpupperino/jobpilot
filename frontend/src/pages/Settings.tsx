@@ -51,6 +51,8 @@ function Automation() {
         onChange={(e) => save({ ...a, auto_submit: e.target.checked })} /> Submit automatically (don't wait for my tap on Telegram)</label>
       <label className="row"><input type="checkbox" style={{ width: "auto", minHeight: 0 }} checked={a.fit_check}
         onChange={(e) => save({ ...a, fit_check: e.target.checked })} /> Skip jobs that don't fit my resume</label>
+      <label className="row"><input type="checkbox" style={{ width: "auto", minHeight: 0 }} checked={a.browser_agent}
+        onChange={(e) => save({ ...a, browser_agent: e.target.checked })} /> Smart browser agent (works out unusual dropdowns, popups and stuck pages step by step before asking me)</label>
       {a.fit_check && (
         <label className="field" style={{ maxWidth: 320 }}>
           Minimum fit score to apply

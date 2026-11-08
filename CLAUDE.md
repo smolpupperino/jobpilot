@@ -17,6 +17,9 @@ and what's next. `SPEC.md` is the design; it wins on conflicts unless Nathan say
   - `apply/worker.py`: the apply loop (read page, plan, fill, submit, evidence).
   - `apply/page.py`: the page reader (EXTRACT_JS) and dropdown helpers.
   - `apply/planner.py`: the AI prompt and `check_plan`, which validates every AI action in code.
+  - `apply/observe.py`, `apply/tools.py`, `apply/agent.py`: the adaptive browser agent (AI
+    snapshot + UI state, validated browser actions, observe/act/verify/recover loop). Used only
+    when the `browser_agent` setting is on. Design and limits: `docs/BROWSER_AGENT.md`.
   - `common_info.py`: common application questions.
   - `info_answers.py`: AI reads free-text Telegram replies into facts.
   - `telegram/bot.py`: the Telegram bot.
@@ -29,7 +32,10 @@ and what's next. `SPEC.md` is the design; it wins on conflicts unless Nathan say
 
 ## Commands
 
-- Tests and lint: `./scripts/test.sh` (pytest + ruff, line length 110).
+- Tests and lint: `./scripts/test.sh` (pytest + ruff, line length 110, then the real-browser
+  tests; `SKIP_BROWSER=1` skips those). Browser tests alone: `./scripts/test-browser.sh`
+  (headless Chromium in a test image against local fixtures, never the live browser).
+  Benchmark: `./scripts/test-browser.sh bench` (see `docs/BROWSER_AGENT.md`).
   `make`, `node` and `npx` aren't on the host; everything builds in Docker.
 - Deploy: `docker compose build app && docker compose up -d app`.
   - Check the build output for TypeScript errors: `-q` hides them, and the old container

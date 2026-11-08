@@ -129,6 +129,7 @@ But it isn't the whole engine. The split:
 | Read a form page and work out what each field is asking | **AI.** It gets the page's field list (labels, types, options from the accessibility tree), not screenshots or pixels. |
 | Decide which profile answer goes in each field | **AI**, but it may only choose from my confirmed profile/answer library or say "ask owner." It can never invent a value. |
 | Actually fill fields, upload the resume, click Next | **Code (Playwright).** Fast and reliable. Every action is logged. |
+| Operate a control the fast path can't (unfamiliar dropdown, popup, stuck page) | **AI, one small step at a time, through JobPilot's own validated browser tools** (setting `browser_agent`; see docs/BROWSER_AGENT.md). The values still come from the checked plan; code decides what's allowed and whether it worked. |
 | Remember a form layout so it's quicker next time | **Code.** Cache the AI's field mapping per ATS and form, so repeat forms need no AI. |
 | Read a job posting and judge fit | **AI**, in full. It explains missing and matching requirements against my profile, with rule-based hard filters first. |
 | Classify employer emails | Rules for the obvious ones, AI for anything unclear. |
@@ -139,6 +140,13 @@ Why this split: an AI that clicks around by looking at screenshots is slow,
 burns quota and makes random mistakes, which was ApplyTwin's problem. An AI
 that **reads the form and outputs a plan, which code then executes**, is fast,
 cheap on repeat forms, and easy to check before submitting.
+
+Amended 2026-11-08 (owner's direction): the fast plan stays the default for ordinary
+fields, but when it can't operate a control or the page is stuck, an adaptive agent
+observes -> acts -> verifies -> recovers in small steps, with an accessibility snapshot,
+targeted screenshots and a short memory of what already failed. It gets a fixed action set
+(click, type, keys, choose, scroll, inspect...) executed and checked by code, never code,
+selectors or a shell. It can't press the final Submit or decide facts.
 
 This also means JobPilot can attempt **any** application site, not only ones
 with a hand-built adapter. Hand-built adapters (Workday first) are still worth

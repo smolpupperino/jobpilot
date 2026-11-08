@@ -131,6 +131,7 @@ export interface AutomationSettings {
   batch_size: number;
   discovery: boolean;
   discovery_interval_minutes: number;
+  browser_agent: boolean;
 }
 
 // Backend stores naive UTC timestamps; show them in the viewer's local time.

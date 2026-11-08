@@ -135,6 +135,10 @@ class AutomationSettings(BaseModel):
     # Job discovery: read job-alert emails in the job Gmail and add the jobs they link to.
     discovery: bool = True
     discovery_interval_minutes: int = Field(default=60, ge=15, le=1440)
+    # Adaptive browser agent (app/apply/agent.py): when the fast page-wide plan can't operate a
+    # control or the page is stuck, work it out step by step (observe, act, verify, recover)
+    # before asking the owner. Off = the previous behavior exactly.
+    browser_agent: bool = False
 
 
 _DEFAULTS: dict[str, type[BaseModel]] = {
