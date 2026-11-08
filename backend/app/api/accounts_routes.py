@@ -81,3 +81,20 @@ async def gmail_open() -> dict:
         await page.goto("https://mail.google.com/mail/u/0/", wait_until="domcontentloaded", timeout=60000)
         await page.bring_to_front()
     return {"ok": True, "view_url": get_settings().browser_view_url or None}
+
+
+@router.get("/discovery/status")
+def discovery_status() -> dict:
+    """When the job Gmail was last checked for job alerts and employer replies, and what was found."""
+    from app import discovery
+
+    return discovery.status()
+
+
+@router.post("/discovery/scan")
+async def discovery_scan() -> dict:
+    """Check the job Gmail now. Results also go to Telegram."""
+    from app import discovery
+
+    await discovery.scan_and_report(manual=True)
+    return discovery.status()

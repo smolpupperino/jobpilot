@@ -62,6 +62,9 @@ and what's next. `SPEC.md` is the design; it wins on conflicts unless Nathan say
   dates, contact details. The `IMPORTANT_LABEL` regex enforces this.
 - Agree to every terms/acknowledgment item (checkboxes and "I Agree" dropdowns), but
   **never** opt in to marketing. E-signature fields get his full name.
+- Security questions on job-site accounts: never use his real information and never ask him.
+  JobPilot picks the questions, makes up the answers, and records them in that job's history
+  (`account.security_answers` event).
 - CAPTCHA is the only allowed hand-off. Account creation is automatic, with one shared
   random job-site password kept in the vault.
 - Gmail is read inside JobPilot's browser (no IMAP app password).

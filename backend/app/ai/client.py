@@ -45,6 +45,17 @@ def _routes(task: str) -> list[tuple[str, str, str]]:
     return out
 
 
+async def runner_request(method: str, path: str, body: dict | None = None, timeout: float = 60) -> dict:
+    """Any other call to the host AI runner (e.g. Gemini sign-in). Never raises on HTTP errors."""
+    transport = httpx.AsyncHTTPTransport(uds=str(get_settings().ai_socket))
+    try:
+        async with httpx.AsyncClient(transport=transport, timeout=timeout) as client:
+            r = await client.request(method, f"http://ai{path}", json=body)
+            return r.json()
+    except (httpx.HTTPError, ValueError) as e:
+        return {"ok": False, "error": f"AI runner unreachable ({type(e).__name__})"}
+
+
 async def _post(payload: dict, timeout: float) -> dict:
     sock = str(get_settings().ai_socket)
     transport = httpx.AsyncHTTPTransport(uds=sock)

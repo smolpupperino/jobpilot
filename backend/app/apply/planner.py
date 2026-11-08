@@ -17,13 +17,16 @@ PAGE_KINDS = ["job_description", "application_form", "review", "confirmation",
               "captcha", "error", "other"]
 ACCOUNT_PAGES = {"sign_in", "create_account", "verify_email_code"}
 FILL_ACTIONS = ["fill", "write", "select", "check", "uncheck", "upload_resume",
-                "account_email", "account_password", "verification_code"]
+                "account_email", "account_password", "account_security_answer", "verification_code"]
+# Security questions while creating/signing in to a job-site account: JobPilot picks the
+# question and makes up the answer (kept derivable from the vault key), like the password.
+SECURITY_LABEL = re.compile(r"security|secret|challenge|hint|recovery|answer|question", re.I)
 
 PLAN_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["page_kind", "fills", "clicks", "questions", "advance_button_id", "advance_kind",
-                 "blocker", "notes"],
+    "required": ["page_kind", "fills", "clicks", "pointer_clicks", "questions", "advance_button_id",
+                 "advance_kind", "blocker", "notes"],
     "properties": {
         "page_kind": {"type": "string", "enum": PAGE_KINDS},
         "fills": {
@@ -41,6 +44,16 @@ PLAN_SCHEMA: dict[str, Any] = {
             },
         },
         "clicks": {"type": "array", "items": {"type": "string"}},
+        # Clicks by position on the screenshot, for things the element list doesn't have.
+        "pointer_clicks": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["x", "y", "why"],
+                "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "why": {"type": "string"}},
+            },
+        },
         "questions": {
             "type": "array",
             "items": {
@@ -75,10 +88,19 @@ it is a choice). Do this for required fields, and for optional ones that matter 
 authorization, sponsorship, salary, EEO/self-identification, how-did-you-hear, etc.). Skip \
 clearly unimportant optional fields (e.g. a second address line) when there is no fact. \
 Before asking, check whether facts already answer it under a different wording, or imply it \
-(a US state or ZIP implies Country "United States"; a full address fact contains the ZIP). \
+(a US state or ZIP implies Country "United States"; a full address fact contains the ZIP; \
+a US address or phone number implies the phone country code "United States (+1)"; a city and \
+state imply the county when it's unambiguous, and the county is also an address fact once known). \
+"Education level" / "highest degree" = the "Highest level of education completed" fact, never a \
+degree still in progress (a school entry can still list its degree with the expected date). \
 A fact that is reasonably on point counts: use it rather than \
 asking (e.g. "Relatives working at the company" = No answers "Are you related to or in a \
-close relationship with an employee or official?"). Ask every missing thing on the page at \
+close relationship with an employee or official?"). Reason from the facts like a person \
+would: "Security clearance" = None answers every clearance question ("active TS/SCI?", \
+"Secret or higher?", "CI Poly?") with No; the work-history jobs whose end date is "Present" are \
+the owner's current employers, so "Do you currently work for <this company>?" is No unless one \
+of them is this company (cite those facts); "Previously employed by the company" = No answers \
+"Have you ever worked for us?". Cite the facts you reasoned from. Ask every missing thing on the page at \
 once, in plain general wording (e.g. "What is your \
 ZIP code?", not the employer's field name or "Country *").
 3. For select and radio fields, "value" must be exactly one of that field's listed options.
@@ -104,9 +126,14 @@ other file inputs alone unless required (then ask).
 already exists for this site. On a sign-in or create-account page set page_kind "sign_in" \
 or "create_account" and use action "account_email" (value "") on the email/username field(s) \
 and "account_password" (value "") on every password and confirm-password field. Never put \
-a real password in "value". If the page is a sign-in page and no account exists, choose the \
-button/link that leads to creating an account as advance (advance_kind "next") instead of \
-filling it; if one exists, fill and sign in. If the page asks for a code that was emailed, \
+a real password in "value". Security questions: pick any offered question in each \
+question dropdown (action "select", a different question each, no fact_ids needed) and use \
+action "account_security_answer" (value "") on each answer field. Never ask the owner \
+about security questions. If the page is a sign-in page and no account exists, choose the \
+button/link that leads to creating an account (e.g. "Create account", "Register", "Don't have \
+an account yet?") as advance (advance_kind "next") instead of filling it. Never use "Sign in \
+with LinkedIn/Google/Facebook/..." buttons; if one exists, fill and sign in. If the page \
+asks for a code that was emailed, \
 set page_kind "verify_email_code" and use action "verification_code" on the code field. If \
 it says to check your email and click a link, set page_kind "verify_email_link". If there \
 is a CAPTCHA set page_kind "captcha".
@@ -133,8 +160,26 @@ expected) terms, privacy-policy, acknowledgment, consent-to-process, and "inform
 true and complete" checkboxes with action "check" and fact_ids [] (no question). NEVER \
 check marketing, newsletter, SMS/text, "talent community", job-alert, or "contact me about \
 other opportunities" boxes; leave them unchecked (or "uncheck" if pre-checked).
-7c. If a screenshot of the page is attached, use it to understand the page; the field and \
-button IDs still come only from the page JSON.
+7c. Two screenshots are attached: first what's on screen right now (pointer_clicks use its \
+pixels), second the whole page top to bottom (to see things scrolled out of view). Look at them \
+like a person would: what the \
+page is asking for, any pop-up/dialog that is open, error messages, what is already filled. \
+The field and button IDs still come only from the page JSON. Work like a careful human: \
+- If the site shows errors ("required", "please select", red messages), fix those first \
+  instead of pressing Next again. \
+- If something you need to press isn't in the buttons/fields JSON (a styled widget, a pop-up \
+  option, an icon), or pressing it by ID didn't work, click it where you SEE it: "pointer_clicks" \
+  [{x, y, why}] in screenshot pixels (the center of the thing). Never use pointer_clicks for the final \
+  Submit (use advance_button_id) and never to type. The page is read again after them. \
+- Anything can be pressed via "clicks" to open a section, dialog or menu (e.g. "Add \
+  résumé", "Add work experience", "Browse", "Upload from my computer"). The page is read \
+  again after clicks, so open things first and fill them next time. \
+- When a resume upload is needed and there is no file box, press whatever opens one (an \
+  "Add/Upload résumé" link, then "Browse"/"My computer"/"Choose file" in the dialog). Any \
+  file picker that opens is answered with the owner's resume automatically. Ignore Dropbox, \
+  Google Drive and other cloud options. \
+- If a dropdown or typeahead didn't take a value, look at its real options and choose the \
+  closest real one (e.g. "Bachelor's Degree" for a B.S.).
 7e. E-signature fields ("By typing my full name below...", "Signature", "Type your name to \
 sign") are part of agreeing to apply: fill them with action "fill" and the owner's full name \
 fact (or first + last name facts), citing those fact ids. Never use "write" for these.
@@ -187,6 +232,7 @@ class CheckedPlan:
     blocker: str
     notes: str
     problems: list[str]
+    pointer: list[dict] = field(default_factory=list)  # [{x, y, why}] screenshot positions
 
 
 # The owner's standing rule: agree to whatever is needed to apply (terms, privacy,
@@ -197,7 +243,10 @@ MARKETING_LABEL = re.compile(
     r"(marketing|newsletter|promotion|offers|special offers|text message|\bsms\b"
     r"|talent (community|network|pool)|job alert|subscribe|keep me (informed|updated)"
     r"|(email|contact|notify) me (about|of|with|regarding) (other|future|new|similar)"
-    r"|future (opportunit|openings|jobs)|share my (data|information) with (third|partners))",
+    r"|future (opportunit|openings|jobs)|share my (data|information) with (third|partners)"
+    r"|personali[sz]ed (job )?recommendations|recommend(ing)? me to recruiters"
+    r"|improve (our )?job[- ]search tools"
+    r"|transcribe my interviews)",
     re.I)
 
 
@@ -249,7 +298,18 @@ def is_low_stakes(label: str) -> bool:
 
 
 NEVER_CLICK = re.compile(r"\b(decline|do not agree|disagree|continue later|save (for|and) (later|exit)"
-                         r"|cancel|withdraw|sign out|log ?out)\b", re.I)
+                         r"|cancel|withdraw|sign out|log ?out)\b"
+                         # Account-wrecking actions, on any site: never.
+                         r"|\b(delete|remove|erase|close|deactivate)\s+(my\s+)?(information|account|profile|data"
+                         r"|candidate (profile|account)|all)\b"
+                         r"|\bchange (my\s+)?(email|e-mail|password|username)\b"
+                         r"|^\s*(account\s+)?settings\s*$"
+                         # Social sign-in: never (no LinkedIn automation; accounts use the job Gmail).
+                         r"|\b(sign|log) ?(in|on|up)\b.{0,20}\b(linkedin|facebook|twitter|google|apple"
+                         r"|indeed|microsoft|github|x)\b"
+                         r"|\b(apply|continue|connect) (with|using|via) (linkedin|facebook|twitter|google"
+                         r"|apple|indeed|microsoft)\b"
+                         r"|^(linkedin|facebook|twitter|google|apple)$", re.I)
 
 
 def build_prompt(facts: list[dict], job: dict, state: PageState, account: dict | None = None,
@@ -272,6 +332,17 @@ def _match_option(value: str, options: list[str]) -> int | None:
     lowered = [o.strip().lower() for o in options]
     if v in lowered:
         return lowered.index(v)
+    from app.apply.page import country_alias
+
+    alias = country_alias(value, options)
+    if alias is not None:
+        return alias
+    # Short choices may carry the question in front ("<question> - No"): match on the choice itself.
+    tails = [o.rsplit(" - ", 1)[-1] for o in lowered]
+    if v in tails and tails.count(v) == 1:
+        return tails.index(v)
+    if " - " in v and v.rsplit(" - ", 1)[-1] in tails and tails.count(v.rsplit(" - ", 1)[-1]) == 1:
+        return tails.index(v.rsplit(" - ", 1)[-1])
     hits = [i for i, o in enumerate(lowered) if o and (v in o or o in v)]
     return hits[0] if len(hits) == 1 else None
 
@@ -282,7 +353,67 @@ def _field_options(f: dict) -> list[str]:
     return list(f.get("options") or [])
 
 
-def check_plan(raw: dict, state: PageState, fact_ids: set[int]) -> CheckedPlan:
+# "Education level" / "highest degree" questions: only the owner's completed level counts,
+# never a degree still in progress. Enforced in code (it's a factual claim).
+EDU_LEVEL_LABEL = re.compile(r"(education(al)? level|level of education"
+                             r"|highest (level of )?(education|degree)"
+                             r"|highest degree|degree (earned|completed|obtained|attained))", re.I)
+EDU_LEVEL_FACT = re.compile(r"highest level of education|education level|highest degree", re.I)
+
+
+def _level_choice(level: str, opts: list[str]) -> str | None:
+    """The option meaning the owner's completed level. "Some college"/no degree, when the list
+    has no such choice, is "High school or equivalent" (the highest level completed)."""
+    if opts:
+        idx = _match_option(level, opts)
+        if idx is not None:
+            return opts[idx]
+    if re.search(r"some college|no degree|high school|ged|secondary", level, re.I):
+        hs = next((o for o in opts if re.search(r"high school|secondary|ged", o, re.I)), None)
+        return hs if opts else "High school"
+    return None if opts else level
+
+
+def _enforce_education_level(actions: list, fields: dict, facts: list[dict], ask) -> list:
+    level = next((f for f in facts if EDU_LEVEL_FACT.search(f.get("label") or "")), None)
+    # A wrong level already on the page (pre-filled, or saved from an earlier try) gets corrected too.
+    planned = {a.field_id for a in actions}
+    if level is not None:
+        for fid, f in fields.items():
+            if fid in planned or not EDU_LEVEL_LABEL.search(f.get("label") or ""):
+                continue
+            cur, opts = (f.get("value") or "").strip(), _field_options(f)
+            want = _level_choice(str(level["value"]), opts)
+            if not cur or (want and want.lower()[:15] in cur.lower()):
+                continue
+            kind = {"select": "select_option", "combobox": "select_combo"}.get(f["kind"], "fill")
+            actions = actions + [Action(fid, kind, want or str(level["value"]), label=f["label"],
+                                        fact_ids=[level["id"]])]
+    out = []
+    for a in actions:
+        f = fields.get(a.field_id)
+        if not f or not EDU_LEVEL_LABEL.search(a.label or "") or a.action in ("check", "uncheck"):
+            out.append(a)
+            continue
+        if level is None:
+            ask(a.field_id, f["label"])  # no saved answer: ask rather than infer from a degree in progress
+            continue
+        opts = _field_options(f)
+        choice_opts = opts if f["kind"] in ("select", "radio", "combobox") else []
+        want = _level_choice(str(level["value"]), choice_opts)
+        if want is None:
+            ask(a.field_id, f["label"])
+            continue
+        a.value = want
+        if f["kind"] == "radio" and opts:
+            a.option_id = f["options"][opts.index(want)]["id"]
+        a.fact_ids, a.written = [level["id"]], False
+        out.append(a)
+    return out
+
+
+def check_plan(raw: dict, state: PageState, fact_ids: set[int],
+               facts: list[dict] | None = None) -> CheckedPlan:
     fields = {k: v for k, v in state.all_fields().items() if not HONEYPOT.search(v.get("label") or "")}
     buttons = state.all_buttons()
     actions: list[Action] = []
@@ -346,11 +477,13 @@ def check_plan(raw: dict, state: PageState, fact_ids: set[int]) -> CheckedPlan:
             continue
         kind = f["kind"]
         page_kind = str(raw.get("page_kind"))
-        if act in ("account_email", "account_password", "verification_code"):
+        if act in ("account_email", "account_password", "account_security_answer", "verification_code"):
             # Values come from the vault / mailbox in code, never from the AI.
             ok = (
                 (act == "account_email" and kind in ("text", "email") and page_kind in ACCOUNT_PAGES)
                 or (act == "account_password" and kind == "password" and page_kind in ACCOUNT_PAGES)
+                or (act == "account_security_answer" and kind in ("text", "password")
+                    and page_kind in ACCOUNT_PAGES and SECURITY_LABEL.search(f["label"] or ""))
                 or (act == "verification_code" and kind in ("text", "number", "tel")
                     and page_kind == "verify_email_code")
             )
@@ -383,7 +516,11 @@ def check_plan(raw: dict, state: PageState, fact_ids: set[int]) -> CheckedPlan:
             auto_agree.add(fid)
             continue
         written = False
-        if act == "write":
+        security_choice = (page_kind in ACCOUNT_PAGES and kind in ("select", "combobox", "radio")
+                           and bool(SECURITY_LABEL.search(f["label"] or "")))
+        if security_choice:
+            cited = []  # picking which security question to use needs no facts
+        elif act == "write":
             if not is_low_stakes(f["label"]) or kind not in TEXT_KINDS | {"select", "radio", "combobox"} \
                     or not value.strip():
                 problems.append(f"won't make up an answer for {fid}; asking owner")
@@ -398,6 +535,9 @@ def check_plan(raw: dict, state: PageState, fact_ids: set[int]) -> CheckedPlan:
             continue
         if kind == "combobox" and not _field_options(f):
             # Options couldn't be read up front; the worker matches the value when it opens it.
+            shown = (f.get("value") or "").strip().lower()
+            if shown and value.strip() and value.split(">")[-1].strip().lower()[:20] in shown:
+                continue  # already chosen
             if value.strip():
                 actions.append(Action(fid, "select_combo", value.strip(), label=f["label"], fact_ids=cited,
                                       written=written))
@@ -405,6 +545,12 @@ def check_plan(raw: dict, state: PageState, fact_ids: set[int]) -> CheckedPlan:
         if kind in ("select", "radio", "combobox"):
             opts = _field_options(f)
             idx = _match_option(value, opts)
+            if idx is None and kind == "combobox" and value.strip():
+                # Options read up front can be a partial list (long, searchable dropdowns): let the
+                # worker type and search for it; if that fails it reports the real choices to retry.
+                actions.append(Action(fid, "select_combo", value.strip(), label=f["label"], fact_ids=cited,
+                                      written=written))
+                continue
             if idx is None:
                 problems.append(f"value not an option for {fid}; asking owner")
                 ask(fid, f["label"])
@@ -452,6 +598,25 @@ def check_plan(raw: dict, state: PageState, fact_ids: set[int]) -> CheckedPlan:
                 questions.pop(m, None)
             asked_groups.add(g)
 
+    # Marketing opt-ins asked as Yes/No (radio or dropdown, e.g. "Would you like to receive text
+    # messages regarding employment opportunities?"): always "No", even if the site pre-chose Yes.
+    for fid, f in fields.items():
+        if f["kind"] not in ("radio", "select") or not MARKETING_LABEL.search(f.get("label") or ""):
+            continue
+        opts = _field_options(f)
+        # Short option labels may carry the question in front ("<question> - No").
+        no = next((i for i, o in enumerate(opts) if re.match(r"\s*no\b", o.rsplit(" - ", 1)[-1], re.I)), None)
+        current = (f.get("value") or "").strip().lower()
+        if no is None or current == opts[no].strip().lower() or (not current and not f.get("required")):
+            continue  # already No, or optional and blank (blank isn't opting in either)
+        actions = [x for x in actions if x.field_id != fid]
+        questions.pop(fid, None)
+        if f["kind"] == "radio":
+            actions.append(Action(fid, "select_radio", opts[no], option_id=f["options"][no]["id"],
+                                  label=f["label"]))
+        else:
+            actions.append(Action(fid, "select_option", opts[no], label=f["label"]))
+
     # Safety net: required, empty fields that nobody planned for get asked about
     # (required agreement boxes are simply checked, per the owner's standing rule).
     planned = {a.field_id for a in actions} | set(questions)
@@ -484,10 +649,10 @@ def check_plan(raw: dict, state: PageState, fact_ids: set[int]) -> CheckedPlan:
     if adv_id:
         text = buttons[adv_id]["text"]
         filled = sum(1 for f in fields.values() if f.get("value") and f.get("value") != "unchecked")
-        has_pw = any(f["kind"] == "password" for f in fields.values())
-        has_code = any(a.action == "verification_code" for a in actions)
-        if str(raw.get("page_kind")) in ACCOUNT_PAGES and (has_pw or has_code):
-            # "Submit"/"Sign In" on a real sign-in/sign-up/code form isn't the application submit.
+        if str(raw.get("page_kind")) in ACCOUNT_PAGES or any(
+                a.action == "account_security_answer" for a in actions):
+            # "Submit"/"Finish"/"Sign In" on sign-in/sign-up/code/security-question pages is never
+            # the application's own submit.
             adv_kind = "next"
         elif SUBMIT_TEXT.search(text) or (APPLY_TEXT.search(text) and filled + len(actions) >= 3):
             adv_kind = "submit"
@@ -504,7 +669,17 @@ def check_plan(raw: dict, state: PageState, fact_ids: set[int]) -> CheckedPlan:
         else:
             problems.append(f"click {bid} refused")
 
+    if facts is not None:
+        actions = _enforce_education_level(actions, fields, facts, ask)
+
+    pointer = []
+    for p in (raw.get("pointer_clicks") or [])[:3]:
+        x, y = p.get("x"), p.get("y")
+        if isinstance(x, int) and isinstance(y, int) and 0 <= x <= 4000 and 0 <= y <= 4000:
+            pointer.append({"x": x, "y": y, "why": str(p.get("why") or "")[:120]})
+
     return CheckedPlan(
+        pointer=pointer,
         page_kind=str(raw.get("page_kind") or "other"),
         actions=actions,
         questions=list(questions.values()),

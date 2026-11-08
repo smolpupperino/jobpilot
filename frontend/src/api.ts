@@ -128,6 +128,9 @@ export interface AutomationSettings {
   daily_summary_hour: number;
   fit_check: boolean;
   min_fit_score: number;
+  batch_size: number;
+  discovery: boolean;
+  discovery_interval_minutes: number;
 }
 
 // Backend stores naive UTC timestamps; show them in the viewer's local time.

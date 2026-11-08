@@ -5,6 +5,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import job_details
 from app.auth import require_owner
 from app.db import get_db
 from app.events import log_event
@@ -72,7 +73,8 @@ def list_jobs(
 
 
 @router.post("")
-def create_job(body: JobIn, db: Session = Depends(get_db)) -> JobOut:
+async def create_job(body: JobIn, db: Session = Depends(get_db)) -> JobOut:
+    """Blank employer/title/location are looked up from the posting in the background."""
     try:
         canon = canonicalize_url(body.url)
     except InvalidJobURL as e:
@@ -94,7 +96,19 @@ def create_job(body: JobIn, db: Session = Depends(get_db)) -> JobOut:
     db.flush()
     log_event(db, "owner", "job.added", job_id=job.id, ats=job.ats, source="manual")
     db.commit()
+    if not (job.employer and job.title and job.location):
+        job_details.fill_later(job.id)
     return _out(job)
+
+
+@router.post("/{job_id}/lookup")
+async def lookup_details(job_id: int, db: Session = Depends(get_db)) -> JobOut:
+    """Fill blank employer/title/location from the posting now."""
+    if db.get(Job, job_id) is None:
+        raise HTTPException(404, "Not found")
+    await job_details.fill(job_id)
+    db.expire_all()
+    return _out(db.get(Job, job_id))
 
 
 @router.get("/{job_id}")

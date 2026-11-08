@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.auth import require_owner
@@ -7,6 +8,7 @@ from app.db import get_db
 from app.events import log_event
 from app.settings_store import (
     AI_TASKS,
+    RUNNABLE_PROVIDERS,
     AISettings,
     AutomationSettings,
     effort_choices,
@@ -26,6 +28,7 @@ def get_ai(db: Session = Depends(get_db)) -> dict:
         "tasks": AI_TASKS,
         "model_suggestions": model_choices(),
         "effort_choices": effort_choices(),
+        "providers": RUNNABLE_PROVIDERS,
     }
 
 
@@ -34,6 +37,10 @@ def put_ai(body: AISettings, db: Session = Depends(get_db)) -> AISettings:
     unknown = set(body.tasks) - set(AI_TASKS)
     if unknown:
         raise HTTPException(400, f"Unknown tasks: {sorted(unknown)}")
+    for name, r in body.tasks.items():
+        for p in (r.provider, r.fallback_provider):
+            if p not in RUNNABLE_PROVIDERS:
+                raise HTTPException(400, f"{name}: {p} isn't installed on the mini PC (use claude or codex)")
     # Changes take effect on the NEXT AI call, including mid-application:
     # AI calls are stateless; application progress lives in the DB + browser.
     put_setting(db, "ai", body)
@@ -66,3 +73,47 @@ def telegram() -> dict:
         "owner_id_configured": s.telegram_owner_id is not None,
         **bot_status(),
     }
+
+
+# --- Gemini sign-in (done from Settings; the CLI runs on the host via the AI runner) ---
+
+class GeminiCode(BaseModel):
+    code: str = Field(min_length=4, max_length=500)
+
+
+@router.get("/gemini")
+async def gemini_status() -> dict:
+    from app.ai.client import runner_request
+
+    h = await runner_request("GET", "/v1/health", timeout=10)
+    return {"installed": bool((h.get("providers") or {}).get("gemini")),
+            "signed_in": bool(h.get("gemini_signed_in")), "runner_ok": h.get("ok") is True,
+            "models": model_choices().get("gemini", [])}
+
+
+@router.post("/gemini/start")
+async def gemini_start() -> dict:
+    """Start Google sign-in for Gemini; returns the link to open."""
+    from app.ai.client import runner_request
+
+    r = await runner_request("POST", "/v1/gemini/login/start", {}, timeout=90)
+    if not r.get("ok"):
+        raise HTTPException(502, r.get("error") or "Couldn't start the Gemini sign-in")
+    return {"url": r["url"]}
+
+
+@router.post("/gemini/finish")
+async def gemini_finish(body: GeminiCode, db: Session = Depends(get_db)) -> dict:
+    """Send the code Google showed; on success, load Gemini's model list."""
+    from app.ai.client import runner_request
+    from app.settings_store import save_gemini_models
+
+    r = await runner_request("POST", "/v1/gemini/login/finish", {"code": body.code.strip()}, timeout=60)
+    if not r.get("ok"):
+        raise HTTPException(400, r.get("error") or "Sign-in failed")
+    log_event(db, "owner", "settings.gemini_connected")
+    db.commit()
+    m = await runner_request("GET", "/v1/gemini/models", timeout=90)
+    if m.get("ok") and m.get("models"):
+        save_gemini_models(m["models"])
+    return await gemini_status()

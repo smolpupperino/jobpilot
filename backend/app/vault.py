@@ -25,7 +25,7 @@ from app.db import utcnow
 from app.events import log_event
 from app.models import SiteAccount
 
-SYMBOLS = "!@#$%*-_"  # accepted by Workday/iCIMS/Taleo password rules
+SYMBOLS = "!@*-_"  # accepted by Workday/iCIMS/Taleo rules; no % # $ (some older sites fail on them)
 
 
 class VaultError(Exception):
@@ -59,7 +59,9 @@ def generate_password(length: int = 20) -> str:
     while True:
         pw = "".join(secrets.choice(alphabet) for _ in range(length))
         if (any(c.islower() for c in pw) and any(c.isupper() for c in pw)
-                and any(c.isdigit() for c in pw) and any(c in SYMBOLS for c in pw)
+                and any(c.isdigit() for c in pw)
+                # At least one symbol every site counts as "special" (some don't count - or _).
+                and any(c in "!@*" for c in pw)
                 and pw[0].isalnum()):
             return pw
 
@@ -104,6 +106,27 @@ def get_or_create_account(db: Session, site: str, email: str, job_id: int | None
     db.flush()
     log_event(db, "system", "account.created", job_id=job_id, site=site, email=email)
     return acct
+
+
+def security_answer(site: str, label: str) -> str:
+    """Made-up answer to a job-site security question: the same site + question always gives
+    the same answer (derived from the vault key, so nothing extra to store)."""
+    import hashlib
+    import hmac
+
+    norm = " ".join((label or "").lower().split())
+    d = hmac.new(_key(), f"security|{site_key(site)}|{norm}".encode(), hashlib.sha256).digest()
+    # Readable but made up, e.g. "maple-harbor-42" (owner's rule: never real information).
+    return f"{_WORDS[d[0] % len(_WORDS)]}-{_WORDS[d[1] % len(_WORDS)]}-{10 + d[2] % 90}"
+
+
+_WORDS = ("maple", "harbor", "falcon", "cedar", "river", "copper", "meadow", "lantern", "orchid", "summit",
+          "pebble", "willow", "comet", "thistle", "canyon", "juniper", "marble", "otter", "prairie", "quartz",
+          "raven", "saffron", "tundra", "velvet", "walnut", "yarrow", "zephyr", "basil", "cobalt", "dune",
+          "ember", "fjord", "garnet", "hazel", "indigo", "jasper", "kestrel", "lagoon", "mesa", "nutmeg",
+          "onyx", "pine", "quill", "russet", "sparrow", "tulip", "umber", "violet", "wren", "aspen",
+          "birch", "clover", "delta", "elm", "fern", "glacier", "heron", "iris", "juno", "kelp",
+          "lilac", "moss", "nova", "opal")
 
 
 def password_of(acct: SiteAccount) -> str:

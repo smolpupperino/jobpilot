@@ -2,10 +2,10 @@
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import FileResponse
 
-from app.apply import worker
+from app.apply import batch, worker
 from app.auth import require_owner
 from app.config import get_settings
 
@@ -24,13 +24,24 @@ async def start_apply(job_id: int, force: bool = False) -> dict:
 
 @router.get("/apply/status")
 def apply_status() -> dict:
-    return worker.status()
+    return {**worker.status(), "batch": batch.status()}
 
 
 @router.post("/apply/stop")
 def apply_stop() -> dict:
-    worker.stop()
-    return worker.status()
+    """Stops the application in progress and any batch."""
+    batch.stop()
+    return apply_status()
+
+
+@router.post("/apply/batch")
+async def start_batch(n: int | None = Query(default=None, ge=1, le=50)) -> dict:
+    """Apply to the next n jobs (default: the batch size in Settings)."""
+    try:
+        await batch.start(n)
+    except worker.ApplyError as e:
+        raise HTTPException(409, str(e)) from e
+    return apply_status()
 
 
 @router.get("/shots/{path:path}")

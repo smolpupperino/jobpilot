@@ -124,3 +124,19 @@ def test_submit_button_on_sign_in_form_is_not_application_submit():
     assert check_plan(plan, st, set()).advance_kind == "next"
     plan["page_kind"] = "application_form"
     assert check_plan(plan, st, set()).advance_kind == "submit"
+
+
+def test_generated_passwords_have_a_widely_accepted_special_character():
+    from app.vault import generate_password
+
+    for _ in range(200):
+        pw = generate_password()
+        assert any(c in "!@*" for c in pw)
+        assert not any(c in "%#$<>&'\"\\" for c in pw)
+
+
+def test_same_company_other_domain_is_related():
+    from app.mail import related
+
+    assert related("passport.amazon.jobs", "idprism-auth.amazon.dev")
+    assert not related("passport.amazon.jobs", "mail.google.com")

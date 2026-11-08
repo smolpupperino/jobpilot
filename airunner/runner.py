@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""JobPilot AI runner: a tiny host-side service that runs the claude / codex CLIs.
+"""JobPilot AI runner: a tiny host-side service that runs the claude / codex / gemini CLIs.
 
 Why it exists: the CLIs and their subscription logins live on the host, not in
 the app container. The container talks to this service over a Unix socket that
@@ -133,7 +133,176 @@ def run_codex(model: str, effort: str, system: str, prompt: str, schema: dict, t
     return result
 
 
-RUNNERS = {"claude": run_claude, "codex": run_codex}
+# --- Gemini ---------------------------------------------------------------------
+# Every tool denied by policy (shell, files, web, MCP): Gemini only answers.
+GEMINI_POLICY = """
+[[rule]]
+toolName = "*"
+decision = "deny"
+priority = 999
+denyMessage = "Tools are disabled. Answer with JSON only."
+
+[[rule]]
+toolName = "*"
+mcpName = "*"
+decision = "deny"
+priority = 999
+"""
+GEMINI_CREDS = os.path.expanduser("~/.gemini/oauth_creds.json")
+
+
+def _gemini_env() -> dict:
+    node_bin = os.path.expanduser("~/.local/opt/node/bin")
+    return dict(os.environ, PATH=f"{node_bin}:{os.environ.get('PATH', '/usr/bin:/bin')}", NO_BROWSER="true",
+                GEMINI_CLI_NO_RELAUNCH="true")
+
+
+def _json_from_text(text: str) -> dict:
+    """The JSON object in a model reply (tolerates ```json fences and chatter around it)."""
+    text = text.strip()
+    if text.startswith("```"):
+        text = text.split("\n", 1)[1] if "\n" in text else text
+        text = text.rsplit("```", 1)[0]
+    start, end = text.find("{"), text.rfind("}")
+    if start < 0 or end <= start:
+        raise AIError("gemini returned no JSON")
+    try:
+        out = json.loads(text[start:end + 1])
+    except ValueError as e:
+        raise AIError("gemini returned invalid JSON") from e
+    if not isinstance(out, dict):
+        raise AIError("gemini returned non-object JSON")
+    return out
+
+
+def run_gemini(model: str, effort: str, system: str, prompt: str, schema: dict, timeout: int, cwd: str,
+               images: list[str]) -> dict:
+    policy = os.path.join(cwd, "deny-all.toml")
+    with open(policy, "w") as f:
+        f.write(GEMINI_POLICY)
+    # JobPilot's instructions replace Gemini's own agent prompt (which talks about tools).
+    system_md = os.path.join(cwd, "system.md")
+    with open(system_md, "w") as f:
+        f.write(system + "\n\nReply with ONE JSON object only (no prose, no code fences) that matches this "
+                "JSON schema:\n" + json.dumps(schema))
+    env = dict(_gemini_env(), GEMINI_SYSTEM_MD=system_md)
+    cmd = [_bin("gemini"), "-p", "Answer the request given on stdin.", "-o", "json", "--policy", policy,
+           "--approval-mode", "default"]
+    if model:
+        cmd += ["-m", model]
+    # Screenshots aren't passed to Gemini (that would need its file tool); it reads the page JSON.
+    try:
+        p = subprocess.run(cmd, input=prompt, capture_output=True, text=True, timeout=timeout, cwd=cwd, env=env)
+    except subprocess.TimeoutExpired as e:
+        raise AIError(f"timed out after {timeout}s") from e
+    try:
+        out = json.loads(p.stdout)
+    except ValueError:
+        tail = (p.stderr or p.stdout or "").strip().splitlines()[-2:]
+        raise AIError(f"gemini exit {p.returncode}: {' | '.join(tail)[:300]}") from None
+    if out.get("error"):
+        raise AIError(f"gemini: {str(out['error'].get('message', out['error']))[:300]}")
+    return _json_from_text(str(out.get("response", "")))
+
+
+class GeminiLogin:
+    """Google sign-in for the Gemini CLI, driven through a pseudo-terminal so the owner can
+    do it from JobPilot's Settings: start() returns Google's link, finish(code) types the code."""
+
+    def __init__(self) -> None:
+        self.pid: int | None = None
+        self.fd: int | None = None
+        self.lock = threading.Lock()
+
+    def _stop(self) -> None:
+        import signal
+
+        if self.pid:
+            try:
+                os.kill(self.pid, signal.SIGTERM)
+                os.waitpid(self.pid, 0)
+            except (OSError, ChildProcessError):
+                pass
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.pid = self.fd = None
+
+    def _read(self, seconds: float, until) -> str:
+        import re
+        import select
+
+        buf, end = b"", time.monotonic() + seconds
+        while time.monotonic() < end:
+            r, _, _ = select.select([self.fd], [], [], 0.5)
+            if r:
+                try:
+                    chunk = os.read(self.fd, 65536)
+                except OSError:
+                    break
+                if not chunk:
+                    break
+                buf += chunk
+            text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07", "", buf.decode("utf-8", "replace"))
+            if until(text):
+                return text
+        return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\x1b\][^\x07]*\x07", "", buf.decode("utf-8", "replace"))
+
+    def start(self) -> dict:
+        import fcntl
+        import pty
+        import re
+        import struct
+        import termios
+
+        with self.lock:
+            self._stop()
+            os.makedirs(os.path.dirname(GEMINI_CREDS), exist_ok=True)
+            settings = os.path.expanduser("~/.gemini/settings.json")
+            try:
+                with open(settings) as f:
+                    conf = json.load(f)
+            except (OSError, ValueError):
+                conf = {}
+            conf.setdefault("security", {}).setdefault("auth", {})["selectedType"] = "oauth-personal"
+            with open(settings, "w") as f:
+                json.dump(conf, f, indent=2)
+            home = tempfile.mkdtemp(prefix="jp-gemini-login-")
+            pid, fd = pty.fork()
+            if pid == 0:
+                os.chdir(home)
+                os.execvpe(_bin("gemini"), [_bin("gemini")], _gemini_env())
+            fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 1000, 0, 0))  # wide: URL on one line
+            self.pid, self.fd = pid, fd
+            pat = re.compile(r"https://accounts\.google\.com/o/oauth2/\S+")
+            text = self._read(45, lambda t: bool(pat.search(t)))
+            m = pat.search(text)
+            if not m:
+                self._stop()
+                raise AIError("Gemini didn't show a Google sign-in link")
+            return {"url": m.group(0)}
+
+    def finish(self, code: str) -> dict:
+        code = (code or "").strip()
+        if not code or len(code) > 500 or any(c.isspace() for c in code):
+            raise AIError("paste the code Google showed you")
+        with self.lock:
+            if self.fd is None:
+                raise AIError("start the Gemini sign-in first")
+            os.write(self.fd, code.encode() + b"\r")
+            self._read(30, lambda t: os.path.exists(GEMINI_CREDS))
+            ok = os.path.exists(GEMINI_CREDS)
+            self._stop()
+            if not ok:
+                raise AIError("Google didn't accept that code. Start again and use the new code.")
+            return {"signed_in": True}
+
+
+gemini_login = GeminiLogin()
+
+RUNNERS = {"claude": run_claude, "codex": run_codex, "gemini": run_gemini}
 
 
 def handle(req: dict) -> dict:
@@ -178,11 +347,33 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/v1/health":
             have = {p: bool(shutil.which(p) or os.path.exists(os.path.expanduser(f"~/.local/bin/{p}")))
                     for p in RUNNERS}
-            self._reply(200, {"ok": True, "providers": have})
+            self._reply(200, {"ok": True, "providers": have, "gemini_signed_in": os.path.exists(GEMINI_CREDS)})
+        elif self.path == "/v1/gemini/models":
+            try:
+                p = subprocess.run([_bin("gemini"), "--list-models"], capture_output=True, text=True, timeout=60,
+                                   env=_gemini_env(), cwd=tempfile.gettempdir())
+                models = [ln.split()[0].strip("-*• ") for ln in p.stdout.splitlines()
+                          if ln.strip().lower().lstrip("-*• ").startswith("gemini")]
+                self._reply(200, {"ok": True, "models": [m for m in dict.fromkeys(models) if m][:30]})
+            except (AIError, OSError, subprocess.TimeoutExpired) as e:
+                self._reply(200, {"ok": False, "error": str(e)[:300]})
         else:
             self._reply(404, {"ok": False, "error": "not found"})
 
     def do_POST(self) -> None:
+        if self.path in ("/v1/gemini/login/start", "/v1/gemini/login/finish"):
+            length = int(self.headers.get("Content-Length") or 0)
+            try:
+                body = json.loads(self.rfile.read(length)) if 0 < length < 10000 else {}
+                if self.path.endswith("start"):
+                    out = gemini_login.start()
+                else:
+                    out = gemini_login.finish(str(body.get("code", "")))
+                self._reply(200, {"ok": True, **out})
+            except (AIError, OSError, ValueError) as e:
+                self._reply(200, {"ok": False, "error": str(e)[:300]})
+            sys.stderr.write(f"gemini login {self.path.rsplit('/', 1)[-1]}\n")  # never the code
+            return
         if self.path != "/v1/run":
             self._reply(404, {"ok": False, "error": "not found"})
             return

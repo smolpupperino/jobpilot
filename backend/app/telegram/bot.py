@@ -32,6 +32,10 @@ HELP_TEXT = (
     "/status - what's happening right now\n"
     "/questions - questions waiting for your answer\n"
     "/setup - answer the common job-application questions once, up front\n"
+    "/batch - apply to the next N jobs (your saved batch size)\n"
+    "/batch 8 - set the batch size to 8 and start\n"
+    "/batchsize 8 - set the batch size without starting\n"
+    "/scan - check the job Gmail for job-alert emails now\n"
     "/pause - emergency stop: no new automated work starts\n"
     "/unpause - allow automated work again\n"
     "/help - this message\n\n"
@@ -163,6 +167,10 @@ class Bot:
             await self._send_open_questions(chat_id)
         elif cmd == "/setup":
             await self._send_setup(chat_id)
+        elif cmd in ("/batch", "/batchsize"):
+            await self._batch_command(chat_id, cmd, text.split()[1:])
+        elif cmd == "/scan":
+            await self._scan(chat_id)
         elif cmd:
             await self.api.send(chat_id, "Unknown command. /help for the list.")
         else:
@@ -323,11 +331,52 @@ class Bot:
             sent = await self.api.send(chat_id, text, buttons or None)
         q.telegram_message_id = sent.get("message_id")
 
+    async def _batch_command(self, chat_id: int, cmd: str, args: list[str]) -> None:
+        from app.apply import batch, worker
+
+        n: int | None = None
+        if args:
+            if not args[0].isdigit() or not 1 <= int(args[0]) <= 50:
+                await self.api.send(chat_id, "Use a number from 1 to 50, like /batch 5.")
+                return
+            n = int(args[0])
+            with self._db() as db:
+                a = get_setting(db, "automation", AutomationSettings)
+                a.batch_size = n
+                put_setting(db, "automation", a)
+                log_event(db, "telegram", "settings.batch_size", batch_size=n)
+                db.commit()
+        if cmd == "/batchsize":
+            if n is None:
+                with self._db() as db:
+                    n = get_setting(db, "automation", AutomationSettings).batch_size
+                await self.api.send(chat_id, f"Batch size is {n}. Change it with /batchsize 8.")
+            else:
+                await self.api.send(chat_id, f"Batch size set to {n}. Start with /batch.")
+            return
+        try:
+            await batch.start(n)  # sends its own "Starting a batch" message
+        except worker.ApplyError as e:
+            await self.api.send(chat_id, f"Can't start a batch: {e}")
+
+    async def _scan(self, chat_id: int) -> None:
+        from app import discovery
+
+        await self.api.send(chat_id, "Checking the job Gmail...")
+        t = asyncio.create_task(discovery.scan_and_report(manual=True))
+        self._tasks.add(t)
+        t.add_done_callback(self._tasks.discard)
+
     def _status_text(self) -> str:
         from app.api.overview_routes import summary
+        from app.apply import batch
 
         with self._db() as db:
-            return format_status(summary(db, 24))
+            text = format_status(summary(db, 24))
+        b = batch.status()
+        if b["running"]:
+            text += f"\nBatch: {b['submitted']} of {b['target']} applied so far ({b['tried']} tried)"
+        return text
 
     def _set_paused(self, paused: bool) -> None:
         with self._db() as db:

@@ -227,3 +227,23 @@ def test_common_questions_api(owner):
     assert bad.status_code == 400
     rows = {x["id"]: x for x in client.get("/api/profile/common", headers=h).json()}
     assert rows["zip"]["value"] == "97301"
+
+
+async def test_short_reply_to_one_question_is_saved_even_if_ai_saves_nothing(bot, api, db, monkeypatch):
+    """A bare "no" to a single question must not be lost (and then asked again)."""
+    import asyncio
+
+    from app.ai.client import AIResult
+
+    async def fake_run_task(task, system, prompt, schema, **kw):
+        return AIResult({"facts": [], "unanswered": []}, "codex", "", "", 1)
+
+    monkeypatch.setattr("app.info_answers.run_task", fake_run_task)
+    create_question(db, "Amazon.jobs needs something I don't know yet:\n1. Have you lived outside the US for "
+                    "12 consecutive months? (options: Yes / No)\n\nReply in one message.", [], kind="info")
+    db.commit()
+    await bot.handle_update(msg("no"))
+    await asyncio.gather(*bot._tasks)
+    db.expire_all()
+    facts = {f.label: f.value for f in db.scalars(select(Fact)).all()}
+    assert facts == {"Have you lived outside the US for 12 consecutive months?": "No"}

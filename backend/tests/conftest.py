@@ -24,6 +24,9 @@ def _fresh_db(tmp_path, monkeypatch):
     eng = dbmod.init_engine(f"sqlite:///{tmp_path / 'test.db'}")
     Base.metadata.create_all(eng)
     auth._failures.clear()
+    from app import job_details
+
+    job_details.ENABLED = False  # no real network lookups from tests
     yield
     eng.dispose()
     get_settings.cache_clear()

@@ -6,9 +6,10 @@ interface AIResponse {
   tasks: Record<string, string>;
   model_suggestions: Record<string, string[]>;
   effort_choices: Record<string, Record<string, string[]>>;
+  providers?: string[];
 }
 
-const PROVIDERS = ["claude", "codex", "gemini", "none"];
+const DEFAULT_PROVIDERS = ["claude", "codex", "none"];
 
 export default function SettingsPage({ onLogout }: { onLogout?: () => void }) {
   return (
@@ -16,6 +17,7 @@ export default function SettingsPage({ onLogout }: { onLogout?: () => void }) {
       <h1>Settings</h1>
       <Automation />
       <AIRouting />
+      <GeminiConnect />
       <JobAccounts />
       <Telegram />
       {onLogout ? (
@@ -59,6 +61,25 @@ function Automation() {
           </select>
         </label>
       )}
+      <label className="field" style={{ maxWidth: 320 }}>
+        Batch size (jobs per batch; Telegram: /batch or /batch 8)
+        <input type="number" min={1} max={50} value={a.batch_size}
+          onChange={(e) => setA({ ...a, batch_size: Math.max(1, Math.min(50, Number(e.target.value) || 1)) })}
+          onBlur={() => save(a)} />
+      </label>
+      <label className="row"><input type="checkbox" style={{ width: "auto", minHeight: 0 }} checked={a.discovery}
+        onChange={(e) => save({ ...a, discovery: e.target.checked })} /> Find jobs in job-alert emails (and track employer replies)</label>
+      {a.discovery && (
+        <label className="field" style={{ maxWidth: 320 }}>
+          Check the job Gmail every
+          <select value={a.discovery_interval_minutes}
+            onChange={(e) => save({ ...a, discovery_interval_minutes: Number(e.target.value) })}>
+            {[[15, "15 minutes"], [30, "30 minutes"], [60, "hour"], [180, "3 hours"], [360, "6 hours"], [1440, "day"]].map(([v, l]) => (
+              <option key={v} value={v}>{l}</option>))}
+          </select>
+        </label>
+      )}
+      {a.discovery && <Discovery />}
       <label className="field" style={{ maxWidth: 260 }}>
         Daily Telegram summary at
         <select value={a.daily_summary_hour} onChange={(e) => save({ ...a, daily_summary_hour: Number(e.target.value) })}>
@@ -67,6 +88,31 @@ function Automation() {
           ))}
         </select>
       </label>
+    </div>
+  );
+}
+
+interface DiscoveryStatus {
+  last_scan: string | null;
+  last_result: { alerts?: number; added?: number; replies?: number; error?: string | null } | null;
+}
+
+function Discovery() {
+  const [d, setD] = useState<DiscoveryStatus | null>(null);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => { api.get<DiscoveryStatus>("/api/discovery/status").then(setD); }, []);
+  const scan = async () => {
+    setBusy(true);
+    try { setD(await api.post<DiscoveryStatus>("/api/discovery/scan")); } finally { setBusy(false); }
+  };
+  const r = d?.last_result;
+  return (
+    <div className="row small">
+      <span className="muted">
+        {!d?.last_scan ? "Not checked yet." : r?.error ? `Last check ${fmtTime(d.last_scan)}: ${r.error}`
+          : `Last check ${fmtTime(d.last_scan)}: ${r?.added ?? 0} new jobs, ${r?.replies ?? 0} employer emails.`}
+      </span>
+      <button className="ghost" disabled={busy} onClick={scan}>{busy ? "Checking..." : "Check now"}</button>
     </div>
   );
 }
@@ -161,10 +207,11 @@ function AIRouting() {
     api.get<AIResponse>("/api/settings/ai").then((d) => { setData(d); setRoutes(d.settings.tasks); });
   }, []);
   if (!data) return null;
+  const PROVIDERS = data.providers ?? DEFAULT_PROVIDERS;
 
   const effortsFor = (provider: string, model: string): string[] => {
     const per = data.effort_choices[provider] ?? {};
-    return per[model] ?? per["*"] ?? [];
+    return (model && per[model]) || per["*"] || [];
   };
   // Changing the model drops an effort level the new model doesn't support.
   const pickModel = (task: string, model: string, fallback = false) => {
@@ -242,6 +289,65 @@ function AIRouting() {
         {saved && <span className="badge ok">Saved</span>}
       </div>
       {err && <div className="error">{err}</div>}
+    </div>
+  );
+}
+
+interface GeminiStatus { installed: boolean; signed_in: boolean; runner_ok: boolean; models: string[] }
+
+/** One-time Google sign-in for Gemini: JobPilot gets the link, you sign in, paste the code. */
+function GeminiConnect() {
+  const [st, setSt] = useState<GeminiStatus | null>(null);
+  const [url, setUrl] = useState("");
+  const [code, setCode] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [msg, setMsg] = useState("");
+  const load = () => { api.get<GeminiStatus>("/api/settings/gemini").then(setSt).catch(() => setSt(null)); };
+  useEffect(load, []);
+  const start = async () => {
+    setBusy(true); setMsg("");
+    try {
+      const r = await api.post<{ url: string }>("/api/settings/gemini/start");
+      setUrl(r.url);
+      window.open(r.url, "_blank", "noopener");
+    } catch (e) { setMsg((e as Error).message); } finally { setBusy(false); }
+  };
+  const finish = async () => {
+    setBusy(true); setMsg("");
+    try {
+      setSt(await api.post<GeminiStatus>("/api/settings/gemini/finish", { code }));
+      setUrl(""); setCode(""); setMsg("Gemini is connected. Pick it as a provider or fallback above, then Save.");
+    } catch (e) { setMsg((e as Error).message); } finally { setBusy(false); }
+  };
+  return (
+    <div className="card stack">
+      <h2>Gemini</h2>
+      {!st ? <p className="muted small">Checking...</p> : !st.installed ? (
+        <p className="small">The Gemini CLI isn't installed on the mini PC.</p>
+      ) : st.signed_in ? (
+        <p className="small"><span className="badge ok">Connected</span>{" "}
+          {st.models.length ? `Models: ${st.models.join(", ")}` : "Uses Gemini's default model."}</p>
+      ) : (
+        <p className="small"><span className="badge">Not connected</span> Sign in once with your Google account
+          to use Gemini (for example as a fallback). Gemini has no effort setting.</p>
+      )}
+      {st?.installed && !url && (
+        <div><button className={st.signed_in ? "ghost" : "primary"} disabled={busy} onClick={start}>
+          {busy ? "Starting..." : st.signed_in ? "Sign in again" : "Connect Gemini"}</button></div>
+      )}
+      {url && (
+        <div className="stack">
+          <p className="small">1. <a href={url} target="_blank" rel="noopener noreferrer">Open Google sign-in</a>{" "}
+            (opened in a new tab) and sign in. 2. Google shows a code: paste it here.</p>
+          <div className="row">
+            <input placeholder="Paste the code from Google" value={code} onChange={(e) => setCode(e.target.value)}
+              autoComplete="off" />
+            <button className="primary" disabled={busy || code.trim().length < 4} onClick={finish}>
+              {busy ? "Checking..." : "Finish"}</button>
+          </div>
+        </div>
+      )}
+      {msg && <span className="small">{msg}</span>}
     </div>
   );
 }

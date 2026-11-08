@@ -1,9 +1,14 @@
 """Connect to JobPilot's browser container over the DevTools protocol."""
 
+import asyncio
 import socket
 from contextlib import asynccontextmanager
 
 from app.config import get_settings
+
+# One automated user of the browser at a time: an application run holds it for the whole
+# run, the email scanner for its short Gmail read. (The owner's own clicks aren't affected.)
+browser_lock = asyncio.Lock()
 
 
 @asynccontextmanager

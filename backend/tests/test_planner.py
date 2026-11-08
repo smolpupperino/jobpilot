@@ -217,3 +217,138 @@ def test_checkbox_group_is_one_question_and_optional_fields_are_skipped():
         {"field_id": "0:e2", "action": "check", "fact_ids": [1]}]}, state, {1})
     assert not plan.questions
     assert [a.field_id for a in plan.actions] == ["0:e2"]
+
+
+def test_social_sign_in_is_never_clicked():
+    for text in ("Sign in with LinkedIn", "Sign in with Facebook", "Apply with LinkedIn", "Sign up with Google",
+                 "Log in with X", "LinkedIn"):
+        cp = check_plan(plan(btn="0:x", kind="next", page_kind="sign_in"),
+                        _state([], [{"id": "x", "text": text, "type": "button"}]), set())
+        assert cp.advance_id is None, text
+    ok = check_plan(plan(btn="0:x", kind="next", page_kind="sign_in"),
+                    _state([], [{"id": "x", "text": "Don't have an account yet?", "type": "a"}]), set())
+    assert ok.advance_id == "0:x" and ok.advance_kind == "next"
+
+
+def test_security_questions_are_made_up_not_asked():
+    q = {"id": "q1", "kind": "select", "label": "Security question 1", "required": True, "value": "Select",
+         "options": ["Select", "What was your first pet's name?", "What city were you born in?"]}
+    a = {"id": "a1", "kind": "text", "label": "Security answer 1", "required": True, "value": ""}
+    raw = plan([{"field_id": "0:q1", "action": "select", "value": "What was your first pet's name?",
+                 "fact_ids": []},
+                {"field_id": "0:a1", "action": "account_security_answer", "value": "", "fact_ids": []}],
+               page_kind="create_account")
+    cp = check_plan(raw, _state([q, a]), set())
+    assert not cp.questions
+    assert [(x.action, x.value) for x in cp.actions] == [("select_option", "What was your first pet's name?"),
+                                                         ("account_security_answer", "")]
+    # Not on application forms: there it needs a real fact like everything else.
+    cp = check_plan({**raw, "page_kind": "application_form"}, _state([q, a]), set())
+    assert not any(x.action == "account_security_answer" for x in cp.actions)
+
+
+def test_security_answers_are_stable_readable_and_distinct():
+    from app.vault import security_answer
+
+    one = security_answer("sjobs.brassring.com", "Answer#1")
+    assert one == security_answer("https://sjobs.brassring.com/x", "answer#1")
+    assert one != security_answer("sjobs.brassring.com", "Answer#2")
+    assert one != security_answer("other.example.com", "Answer#1")
+    w1, w2, num = one.split("-")
+    assert w1.isalpha() and w2.isalpha() and 10 <= int(num) <= 99
+
+
+def test_account_wrecking_buttons_never_clicked():
+    for text in ("Delete My Information", "Delete my account", "Change Email", "Settings", "Remove my profile"):
+        cp = check_plan(plan(btn="0:x", kind="next"), _state([], [{"id": "x", "text": text, "type": "button"}]),
+                        set())
+        assert cp.advance_id is None, text
+    ok = check_plan(plan(btn="0:x", kind="next"), _state([], [{"id": "x", "text": "Save and Continue",
+                                                              "type": "button"}]), set())
+    assert ok.advance_id == "0:x"
+
+
+def test_placeholder_rows_are_not_options():
+    from app.apply.page import NO_MATCH
+
+    for t in ("No Items.", "No matches found", "No results", "Loading...", "Type to search"):
+        assert NO_MATCH.match(t), t
+    assert not NO_MATCH.match("No, I've never been employed")
+
+
+def test_finish_on_account_pages_is_not_the_application_submit():
+    q = {"id": "q1", "kind": "select", "label": "Question 1", "required": True,
+         "value": "What high school did you attend?", "options": ["What high school did you attend?"]}
+    a = {"id": "a1", "kind": "text", "label": "Answer 1", "required": True, "value": ""}
+    raw = plan([{"field_id": "0:a1", "action": "account_security_answer", "value": "", "fact_ids": []}],
+               btn="0:f", kind="submit", page_kind="create_account")
+    cp = check_plan(raw, _state([q, a], [{"id": "f", "text": "Finish", "type": "button"}]), set())
+    assert cp.advance_kind == "next"
+    cp = check_plan({**raw, "fills": []}, _state([], [{"id": "f", "text": "Finish", "type": "button"}]), set())
+    assert cp.advance_kind == "next"  # any account page
+
+
+def test_marketing_yes_no_is_always_no():
+    texts = {"id": "t1", "kind": "radio", "required": True, "value": "Yes",
+             "label": "Would you like to receive text messages regarding employment opportunities?",
+             "options": [{"id": "y", "label": "Yes"}, {"id": "n", "label": "No"}]}
+    cp = check_plan(plan(), _state([texts]), set())
+    assert [(a.action, a.value, a.option_id) for a in cp.actions] == [("select_radio", "No", "n")]
+    assert not cp.questions
+
+
+def test_marketing_no_found_when_option_carries_question():
+    q = "Would you like to receive text messages regarding employment opportunities?*"
+    texts = {"id": "t1", "kind": "radio", "required": False, "value": "Yes", "label": q + " Yes No",
+             "options": [{"id": "y", "label": "Yes"}, {"id": "n", "label": q + " - No"}]}
+    cp = check_plan(plan(), _state([texts]), set())
+    assert [(a.action, a.option_id) for a in cp.actions] == [("select_radio", "n")]
+
+
+def test_education_level_uses_completed_level_not_degree_in_progress():
+    lvl = {"id": "e1", "kind": "select", "label": "Education level", "required": True, "value": "",
+           "options": ["Select", "High school", "Some college", "Associate's", "Bachelor's"]}
+    facts = [{"id": 34, "section": "education", "label": "School 1 degree", "value": "B.S."},
+             {"id": 81, "section": "education", "label": "Highest level of education completed",
+              "value": "Some college"}]
+    raw = plan([{"field_id": "0:e1", "action": "select", "value": "Bachelor's", "fact_ids": [34]}])
+    cp = check_plan(raw, _state([lvl]), {34, 81}, facts)
+    assert [(a.value, a.fact_ids) for a in cp.actions] == [("Some college", [81])]
+    cp = check_plan(raw, _state([lvl]), {34}, facts[:1])  # no saved level: ask, don't guess
+    assert not cp.actions and [q.field_id for q in cp.questions] == ["0:e1"]
+
+
+def test_education_level_some_college_maps_to_high_school_and_fixes_prefilled():
+    lvl = {"id": "e1", "kind": "select", "label": "Education level", "required": True, "value": "Bachelor's",
+           "options": ["High school or equivalent", "Associate's", "Bachelor's", "Master's"]}
+    facts = [{"id": 81, "section": "education", "label": "Highest level of education completed",
+              "value": "Some college"}]
+    cp = check_plan(plan(), _state([lvl]), {81}, facts)  # AI planned nothing; the page shows Bachelor's
+    assert [(a.action, a.value, a.fact_ids) for a in cp.actions] == [
+        ("select_option", "High school or equivalent", [81])]
+
+
+def test_yes_no_choices_with_question_prefix_still_match():
+    from app.apply.planner import _match_option
+
+    q = "Are you living in or physically located in any of the sanctioned countries"
+    opts = [q + " - Yes", q + " - No"]
+    assert _match_option("No", opts) == 1 and _match_option("Yes", opts) == 0
+
+
+def test_united_states_matches_the_country_not_outlying_islands():
+    from app.apply.page import best_option
+    from app.apply.planner import _match_option
+
+    opts = ["American Samoa", "United Arab Emirates", "United States Minor Outlying Islands",
+            "United States of America"]
+    for v in ("United States", "USA", "US", "united states of america"):
+        assert _match_option(v, opts) == 3 and best_option(v, opts) == 3, v
+
+
+def test_searchable_dropdown_value_outside_partial_list_is_searched_not_asked():
+    cit = {"id": "c1", "kind": "combobox", "label": "In which country/region do you have citizenship?",
+           "required": True, "value": "", "options": ["Afghanistan", "Albania", "Algeria"]}
+    raw = plan([{"field_id": "0:c1", "action": "select", "value": "United States", "fact_ids": [96]}])
+    cp = check_plan(raw, _state([cit]), {96})
+    assert [(a.action, a.value) for a in cp.actions] == [("select_combo", "United States")] and not cp.questions

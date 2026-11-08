@@ -48,6 +48,11 @@ def _models_json() -> dict:
 _EFFORT_SET = {"low", "medium", "high", "xhigh", "max", "ultra"}
 
 
+# Providers the host AI runner (airunner/runner.py) can run. Gemini needs a one-time Google
+# sign-in (Settings -> AI models -> Connect Gemini).
+RUNNABLE_PROVIDERS = ["claude", "codex", "gemini", "none"]
+
+
 def effort_choices() -> dict[str, dict[str, list[str]]]:
     """Effort levels per provider and model. Key "*" = levels for any model of that provider."""
     out: dict[str, dict[str, list[str]]] = {"claude": {"*": list(CLAUDE_EFFORTS)}, "codex": {}, "gemini": {}}
@@ -60,7 +65,27 @@ def effort_choices() -> dict[str, dict[str, list[str]]]:
             for model, levels in per.items():
                 if isinstance(model, str) and isinstance(levels, list):
                     out[provider][model] = [x for x in levels if x in _EFFORT_SET]
+    # "Default" model: offer the levels every listed model of that provider supports.
+    for per in out.values():
+        if "*" not in per and per:
+            common = set.intersection(*(set(v) for v in per.values()))
+            order = ["low", "medium", "high", "xhigh", "max", "ultra"]
+            per["*"] = [x for x in order if x in common]
     return out
+
+
+def save_gemini_models(models: list[str]) -> None:
+    """Remember the Gemini models the CLI offers (merged into models.json)."""
+    import json
+
+    from app.config import get_settings
+
+    path = get_settings().data_dir / "models.json"
+    data = _models_json()
+    data["gemini"] = [m for m in models if isinstance(m, str) and len(m) < 100][:30]
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(json.dumps(data, indent=2))
+    tmp.replace(path)
 
 
 def model_choices() -> dict[str, list[str]]:
@@ -105,6 +130,11 @@ class AutomationSettings(BaseModel):
     # Before applying, compare the posting with the resume; skip if below min_fit_score.
     fit_check: bool = True
     min_fit_score: int = Field(default=50, ge=0, le=100)
+    # Batch runs: "apply to the next N jobs". Skipped/failed jobs don't count toward N.
+    batch_size: int = Field(default=5, ge=1, le=50)
+    # Job discovery: read job-alert emails in the job Gmail and add the jobs they link to.
+    discovery: bool = True
+    discovery_interval_minutes: int = Field(default=60, ge=15, le=1440)
 
 
 _DEFAULTS: dict[str, type[BaseModel]] = {

@@ -120,3 +120,16 @@ def test_fit_check_settings_defaults_and_validation(owner):
     assert a["fit_check"] is True and a["min_fit_score"] == 50
     a["min_fit_score"] = 150
     assert owner.put("/api/settings/automation", json=a, headers=H).status_code == 422
+
+
+def test_providers_and_default_model_efforts(owner):
+    from tests.conftest import H
+
+    d = owner.get("/api/settings/ai").json()
+    assert d["providers"] == ["claude", "codex", "gemini", "none"]
+    assert d["effort_choices"]["claude"]["*"]
+    tasks = d["settings"]["tasks"]
+    tasks["chat"]["fallback_provider"] = "gemini"
+    assert owner.put("/api/settings/ai", json={"tasks": tasks}, headers=H).status_code == 200
+    tasks["chat"]["provider"] = "openai"
+    assert owner.put("/api/settings/ai", json={"tasks": tasks}, headers=H).status_code == 422

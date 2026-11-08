@@ -50,7 +50,8 @@ Turn the reply into profile facts to save.
 message", "same as my real name", "yes to all", "no to both").
 - Use these standard labels and sections when a question matches one: STANDARD_LABELS. Otherwise \
 use a short, general form-style label (not tied to one employer) in the best section.
-- If a question listed options, the value must be exactly one of them.
+- If a question listed options, use the option the reply means (closest match); a bare "yes"/"no" \
+answers a yes/no question. Use a label that states the question plainly.
 - Only save what the owner actually said or clearly implied; never guess. List questions the \
 reply didn't answer in "unanswered" (as short questions).
 - Never output SSNs, passwords, bank details, or passport numbers."""
@@ -97,7 +98,35 @@ async def absorb(questions: str, reply: str, job_id: int | None = None) -> dict:
                 rejected.append(f"{label}: {e}")
         db.commit()
     unanswered = [str(u)[:200] for u in (out.get("unanswered") or [])][:20]
+    if not saved and not rejected:
+        one = _single_question(questions)
+        if one and 0 < len(reply.strip()) <= 80:
+            # One question, short reply, nothing saved: the reply IS the answer to that question.
+            value = reply.strip()
+            if value.lower() in ("y", "yes", "yeah", "yep", "yup"):
+                value = "Yes"
+            elif value.lower() in ("n", "no", "nope", "nah"):
+                value = "No"
+            with session_factory()() as db:
+                try:
+                    upsert_fact(db, section="answers", label=one[:300], value=value[:2000], source="telegram",
+                                status="confirmed", actor="telegram")
+                    db.commit()
+                    saved.append((one[:300], value))
+                    unanswered = []
+                except ProfileError as e:
+                    rejected.append(f"{one[:60]}: {e}")
     return {"saved": saved, "unanswered": unanswered, "rejected": rejected}
+
+
+def _single_question(questions: str) -> str | None:
+    """The question text if the message asked exactly one ("1. <question> (options: ...)")."""
+    import re
+
+    items = re.findall(r"^\s*\d+\.\s+(.+)$", questions, re.M)
+    if len(items) != 1:
+        return None
+    return re.sub(r"\s*\((options|e\.g\.)[^)]*\)?\s*$", "", items[0]).strip() or None
 
 
 def summary_text(result: dict) -> str:

@@ -34,11 +34,13 @@ STATIC_DIR = Path(__file__).parent / "static"
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     from app.apply.worker import recover_interrupted
+    from app.discovery import run_loop
 
     recover_interrupted()
-    bot_task = asyncio.create_task(run_bot())
+    tasks = [asyncio.create_task(run_bot()), asyncio.create_task(run_loop())]
     yield
-    bot_task.cancel()
+    for t in tasks:
+        t.cancel()
 
 
 def create_app(start_background: bool = True) -> FastAPI:

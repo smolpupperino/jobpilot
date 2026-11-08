@@ -1,6 +1,6 @@
 # Status
 
-Last updated: 2026-11-06
+Last updated: 2026-11-07
 
 Labels: **Done** = built and tested. **Partial** = some of it works. **Planned** = not started.
 
@@ -49,7 +49,7 @@ Labels: **Done** = built and tested. **Partial** = some of it works. **Planned**
 
 ## Tests
 
-`./scripts/test.sh`: 79 backend tests (incl. the plan safety checker) (auth, CSRF, throttle, session invalidation, dedupe, ATS
+`./scripts/test.sh`: 137 backend tests (incl. the plan safety checker) (auth, CSRF, throttle, session invalidation, dedupe, ATS
 detection incl. lookalike domains, profile guards, resume immutability, Telegram owner-lock,
 button and reply answers, SSN refusal, daily summary once/day, settings validation).
 Frontend: strict TypeScript typecheck in the build.
@@ -59,11 +59,13 @@ overview → container restart → data and login still there.
 
 ## Next up (as of 2026-11-07)
 
-1. **Batch runs:** apply to a customizable number of jobs in one go, e.g. "apply to the next
-   N jobs". Set N in Settings or from Telegram, run them one after another, and send a summary.
-2. **Job discovery:** read job-alert emails (Gmail in JobPilot's browser) to add jobs
-   automatically (employer replies feed the job timelines).
-3. Keep fixing new ATS sites as real runs hit them.
+1. **Set up job alerts on the job Gmail** (LinkedIn, Indeed, and company career sites like
+   Workday/Greenhouse "job alerts"). As of 2026-11-07 the inbox has no alert emails, so
+   discovery has nothing to read yet. Gmail is signed in again and the scanner works.
+2. Keep fixing new ATS sites as real runs hit them.
+3. Ideas, not started: start a batch automatically after a scan finds jobs; send unclear
+   employer emails to AI (the `email_classifier` task) or a review queue; follow
+   Glassdoor/ZipRecruiter alert links (skipped now: they're tracking redirects).
 
 Already done (this list was stale before): fit check before applying, browser autofill,
 the vault, and automatic Submit. Two real applications were submitted and confirmed on
@@ -86,3 +88,26 @@ Backups: not wanted.
 - Pages are filled first, then remaining questions are asked. Optional fields are never asked about.
 - Checkbox groups ("What is your desired salary?" + range boxes) are one question; hidden helper
   inputs (react-select's required input) are ignored.
+
+## Batch runs and job discovery (2026-11-07)
+
+| Item | Status | Notes |
+|---|---|---|
+| Batch runs | Done | "Apply to the next N jobs". N = `batch_size` (Settings, Jobs page, or Telegram `/batch 8`, `/batchsize 8`). Interested jobs first, then New, newest first. Only submitted applications count toward N; poor fits and failures don't, capped at 3*N tries. Never LinkedIn URLs; never jobs whose last try errored (retry those by hand). One Telegram summary at the end. Dashboard Stop or /pause stops it. Code: `app/apply/batch.py`. |
+| Job discovery from job-alert emails | Done (tested with sample emails) | Every `discovery_interval_minutes` (default 60) and on `/scan` or Settings "Check now": reads unread mail (inbox + Updates/Promotions/Social tabs) in the job Gmail. Alert emails (LinkedIn, Indeed, company career sites) -> new jobs, deduped. Only links that are themselves a job posting on a known ATS/board are kept; redirects are never followed. Code: `app/discovery.py`. |
+| Employer replies -> timelines | Done (rules only) | Linked only when exactly one sent application matches (employer name, or the ATS domain if only one job uses it). Received -> Acknowledged, rejection -> Rejected, interview -> Interview (Telegram alert right away). Assessments are alerted too. Unclear emails go on the timeline only. |
+| Browser sharing | Done | An application run and the email scan take turns using the browser (one lock). |
+| LinkedIn leads | By design | Added as New jobs for you to apply to yourself (no LinkedIn automation). Batches skip them. |
+| Gmail "show original" fix | Done | Gmail began returning 404 for the old link; it now needs the account key (`ik`). Without it only a short preview was read. Also: Greenhouse mail (`greenhouse-mail.io`) and Jobvite mail for Talemetry portals now count as the same site. Verified live: the First Tech and Farmers "thanks for applying" emails moved both jobs to Acknowledged. |
+| Job details from the link | Done | Paste just a link: employer, title and location are read from the posting in the background (schema.org JobPosting data, then page tags, then JobPilot's browser for JavaScript sites, then AI on the page text). Only blank fields are filled. Also runs for jobs found in emails, and from "Look up details" on a job. Never fetches LinkedIn; the plain download refuses private/LAN/Tailscale addresses. Verified live on BAE Systems (all 3 fields from page data). Code: `app/job_details.py`. |
+| Sign-in pages with a "create account" link (BrassRing / BAE) | Fixed | The page reader skipped links like "Don't have an account yet?" (a `#0` link that runs JavaScript), so the AI saw no way forward. Links that act as buttons and account words (create, register, sign up) are now shown. Social sign-in buttons (LinkedIn, Google, Facebook, ...) are refused in code. Also: invisible (opacity 0) spinners no longer count as "still loading", which had cost 90-180s per step. |
+| AI sees every page | Done | The planner now gets the screenshot on every step (before: only when stuck), plus the element list. The page reader also lists anything clickable (styled labels/spans, tabs, menu items), and the prompt tells the AI to work like a person: fix the site's error messages first, open dialogs/sections with clicks, use "Add résumé" then "Browse" (file pickers get the resume automatically), pick real dropdown options. Direction (owner, 2026-11-07): general abilities, not per-site rules. |
+| Security questions | Done | Owner's rule: JobPilot picks the questions and makes up readable answers (e.g. "maple-harbor-42"), the same per site and question, recorded in the job's history (`account.security_answers`). Never his real info, never asked. |
+| What we entered (per application) | Done | Every filled field is recorded per page (`apply.filled`): field, value, and where it came from (profile, AI-written, standing rule, made up, account). Shown under a job's Details on the Jobs page. The shared password and emailed codes are not written into it. |
+| BAE Systems (BrassRing) | Submitted, confirmed (2026-11-07) | Third real confirmed application. Fixes along the way are all general: page reader shows button-like links and clickable labels; invisible spinners ignored; AI sees the screenshot every step; made-up security answers; typeahead dropdowns typed key by key with shorter searches and the real choices reported back; a failed field gets 3 tries before the owner is asked; a second AI check looks for the answer in saved facts before any question is sent. |
+| Gemini | Installed, not signed in | Gemini CLI 0.67 + Node 22 in ~/.local (Node 26 needs libatomic, not installed). The AI runner runs it with every tool denied by policy (`toolName = "*"` deny) and JobPilot's own system prompt; screenshots aren't passed to Gemini. Owner signs in from Settings -> Gemini -> Connect Gemini (runner drives Google's sign-in in a pseudo-terminal; owner pastes Google's code). Settings offers its models after sign-in; no effort setting. |
+| Effort selector | Fixed | "Default" model now offers the effort levels all that provider's models support. |
+| Rosendin Electric (Workday) | Submitted, confirmed (2026-11-08) | Fourth real confirmed application, first Workday one. General fixes on the way: page reads time out instead of hanging (a frozen Workday tab had hung the browser); Workday search-and-pick boxes treated as dropdowns, with nested categories ("Career Websites > Corporate Website"), Enter-to-search, and "already chosen" checks; placeholder rows ("No Items.") ignored; dropdown questions read from the surrounding fieldset/form field instead of the button's own value label; "did it take?" checks only the box itself; header/nav menus ignored; account-wrecking buttons (Delete my information, Change email, Settings) refused in code. |
+| Gmail session | Watch | Google signed the job Gmail out twice on 2026-11-07 (once after a browser restart). Cause not confirmed. |
+| CHKD (symplr / HealthcareSource) | Blocked by the site | Account sign-up fails server-side every time ("An error occurred while updating the entries"). Ruled out: our security answers (short plain ones fail too), an existing account (email not registered), the password (`%` removed, then a password with `!@*`; still fails). Job set back to Interested. Fixes from it: "Finish" on account pages isn't the application submit; same error 3x after Submit -> stop and tell the owner; marketing Yes/No (radio/dropdown) answered No even when the site pre-picks Yes; generated passwords use only `!@*-_` and always include one of `!@*`. Shared password rotated twice on 2026-11-08 (existing accounts keep their own saved passwords). |
+| Amazon (amazon.jobs) | Submitted, confirmed (2026-11-08) | Data Center Technician. REQUIRED online assessment by Tue Dec 8 2026 (owner does it). Fixes on the way: verification email from another company domain (amazon.dev vs amazon.jobs) + newest-fresh-code fallback + AI email read; open a link directly when clicking does nothing or keeps returning to the same page; two screenshots per step (viewport + full page); AI can click by screenshot position (code checks what's under the point); Select2/Chosen dropdowns chosen on the hidden real <select>, or typed into their own search box; highlighted != chosen; partial option lists searched instead of asked; "United States"/USA match the country, not outlying islands; Yes/No radios with the question glued to the option label; education level enforced from "Highest level of education completed" (Some college -> High school or equivalent), including wrong pre-filled values; short Telegram replies to one question always saved; re-check after filling; AI review of the whole application before Submit; data-sharing "AI preference" opt-ins answered No; vanished Submit button after a successful submit no longer crashes. |
